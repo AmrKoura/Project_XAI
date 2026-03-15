@@ -1,0 +1,21 @@
+# =============================================================================
+# File and directory paths
+# =============================================================================
+
+data:
+  raw_dir: "data/raw"
+  m5_dir: "data/raw/m5"
+  rossmann_dir: "data/raw/rossmann"
+  samples_dir: "data/samples"
+  interim_dir: "data/interim"
+  processed_dir: "data/processed"
+  external_dir: "data/external"
+
+artifacts:
+  models_dir: "artifacts/models"
+  figures_dir: "artifacts/figures"
+  explanations_dir: "artifacts/explanations"
+  reports_dir: "artifacts/reports"
+
+config:
+  config_file: "config/config.yaml"

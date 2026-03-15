@@ -1,0 +1,60 @@
+# =============================================================================
+# Global project configuration
+# =============================================================================
+
+project:
+  name: "xai-retail-replenishment"
+  version: "0.1.0"
+  random_seed: 42
+
+# --- Data settings ---
+data:
+  primary_dataset: "m5"            # m5 | rossmann | favorita
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  target_column: "sales"
+  date_column: "date"
+
+# --- Feature engineering ---
+features:
+  lag_days: [7, 14, 28]
+  rolling_windows: [7, 14, 28]
+  include_holidays: true
+  include_promotions: true
+
+# --- Forecasting model ---
+model:
+  primary: "lightgbm"
+  benchmarks: ["xgboost", "arima", "exponential_smoothing"]
+  quantiles: [0.1, 0.5, 0.9]
+  lightgbm_params:
+    n_estimators: 1000
+    learning_rate: 0.05
+    num_leaves: 63
+    max_depth: -1
+    min_child_samples: 20
+    early_stopping_rounds: 50
+
+# --- Explainability ---
+xai:
+  shap_max_samples: 1000
+  counterfactual_features: ["promo", "price", "lead_time"]
+
+# --- Replenishment ---
+replenishment:
+  service_level_target: 0.95
+  default_lead_time_days: 7
+  safety_stock_method: "quantile"   # quantile | mad
+
+# --- Dashboard ---
+dashboard:
+  host: "127.0.0.1"
+  port: 8050
+  debug: true
+
+# --- Evaluation metrics ---
+evaluation:
+  accuracy: ["mae", "rmse", "smape", "quantile_loss"]
+  bias: ["bias", "mad", "tracking_signal"]
+  business: ["value_add", "service_level", "stockout_rate", "inventory_turnover"]
