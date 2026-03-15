@@ -1,3 +1,11 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python.defaultInterpreterPath": "C:/Users/amrok/AppData/Local/Programs/Python/Python312/python.exe",
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.env.windows": {
+        "PATH": "C:/Users/amrok/AppData/Local/Programs/Python/Python312;C:/Users/amrok/AppData/Local/Programs/Python/Python312/Scripts;${env:PATH}"
+    },
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/xai-retail-replenishment/src"
+    ]
 }
