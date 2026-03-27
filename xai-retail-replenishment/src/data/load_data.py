@@ -49,13 +49,16 @@ def load_m5(data_dir: str) -> dict[str, pd.DataFrame]:
 
     calendar = _read_csv(root / "calendar.csv", parse_dates=["date"])
     prices = _read_csv(root / "sell_prices.csv")
-    sample_submission = _read_csv(root / "sample_submission.csv")
 
     data: dict[str, pd.DataFrame] = {
         "calendar": calendar,
         "prices": prices,
-        "sample_submission": sample_submission,
     }
+
+    # sample_submission is optional
+    sample_submission_path = root / "sample_submission.csv"
+    if sample_submission_path.exists():
+        data["sample_submission"] = _read_csv(sample_submission_path)
 
     validation_path = root / "sales_train_validation.csv"
     evaluation_path = root / "sales_train_evaluation.csv"
