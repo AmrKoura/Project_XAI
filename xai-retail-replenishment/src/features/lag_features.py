@@ -42,6 +42,39 @@ def _sort_by_time(df: pd.DataFrame, group_cols: list[str]) -> tuple[pd.DataFrame
     return out, date_col
 
 
+def _infer_step_days(df: pd.DataFrame, date_col: str | None, group_cols: list[str]) -> int:
+    """Infer the median row step in days from the timestamp column.
+
+    Returns 1 when no reliable estimate is available so behavior falls back
+    to row-based semantics (daily-style datasets).
+    """
+    if date_col is None or date_col not in df.columns:
+        return 1
+
+    if group_cols:
+        diffs = (
+            df.groupby(group_cols, sort=False)[date_col]
+            .diff()
+            .dt.days
+            .dropna()
+        )
+    else:
+        diffs = df[date_col].diff().dt.days.dropna()
+
+    diffs = diffs[diffs > 0]
+    if diffs.empty:
+        return 1
+
+    step = int(round(float(diffs.median())))
+    return max(1, step)
+
+
+def _days_to_rows(day_values: list[int], step_days: int) -> list[int]:
+    """Convert day-based horizons to row-based windows using step_days."""
+    rows = [max(1, int(np.ceil(day / step_days))) for day in day_values]
+    return rows
+
+
 def add_lag_features(
     df: pd.DataFrame,
     target_col: str = "sales",
@@ -57,7 +90,7 @@ def add_lag_features(
     group_cols : list[str] | None
         Columns defining the SKU-store group (e.g. ``['store_id', 'item_id']``).
     lags : list[int] | None
-        Lag periods (default: ``[7, 14, 28]``).
+        Lag periods in days (default: ``[7, 14, 28]``).
 
     Returns
     -------
@@ -69,16 +102,18 @@ def add_lag_features(
 
     lags = lags or [7, 14, 28]
     group_cols = _resolve_group_cols(out, group_cols)
-    out, _ = _sort_by_time(out, group_cols)
+    out, date_col = _sort_by_time(out, group_cols)
+    step_days = _infer_step_days(out, date_col, group_cols)
+    lag_rows = _days_to_rows(lags, step_days)
 
     out[target_col] = pd.to_numeric(out[target_col], errors="coerce")
     if group_cols:
         grouped = out.groupby(group_cols, sort=False)[target_col]
-        for lag in lags:
-            out[f"{target_col}_lag_{lag}"] = grouped.shift(lag)
+        for lag_day, lag_row in zip(lags, lag_rows):
+            out[f"{target_col}_lag_{lag_day}"] = grouped.shift(lag_row)
     else:
-        for lag in lags:
-            out[f"{target_col}_lag_{lag}"] = out[target_col].shift(lag)
+        for lag_day, lag_row in zip(lags, lag_rows):
+            out[f"{target_col}_lag_{lag_day}"] = out[target_col].shift(lag_row)
 
     return out
 
@@ -97,7 +132,7 @@ def add_rolling_features(
     target_col : str
     group_cols : list[str] | None
     windows : list[int] | None
-        Window sizes (default: ``[7, 14, 28]``).
+        Window sizes in days (default: ``[7, 14, 28]``).
 
     Returns
     -------
@@ -109,7 +144,9 @@ def add_rolling_features(
 
     windows = windows or [7, 14, 28]
     group_cols = _resolve_group_cols(out, group_cols)
-    out, _ = _sort_by_time(out, group_cols)
+    out, date_col = _sort_by_time(out, group_cols)
+    step_days = _infer_step_days(out, date_col, group_cols)
+    window_rows = _days_to_rows(windows, step_days)
 
     out[target_col] = pd.to_numeric(out[target_col], errors="coerce")
     if group_cols:
@@ -117,26 +154,26 @@ def add_rolling_features(
         temp = out[group_cols].copy()
         temp["shifted"] = shifted
         grouped_shifted = temp.groupby(group_cols, sort=False)["shifted"]
-        for window in windows:
-            out[f"{target_col}_roll_mean_{window}"] = grouped_shifted.transform(
-                lambda s: s.rolling(window, min_periods=1).mean()
+        for window_day, window_row in zip(windows, window_rows):
+            out[f"{target_col}_roll_mean_{window_day}"] = grouped_shifted.transform(
+                lambda s: s.rolling(window_row, min_periods=1).mean()
             )
-            out[f"{target_col}_roll_std_{window}"] = grouped_shifted.transform(
-                lambda s: s.rolling(window, min_periods=1).std()
+            out[f"{target_col}_roll_std_{window_day}"] = grouped_shifted.transform(
+                lambda s: s.rolling(window_row, min_periods=1).std()
             )
-            out[f"{target_col}_roll_min_{window}"] = grouped_shifted.transform(
-                lambda s: s.rolling(window, min_periods=1).min()
+            out[f"{target_col}_roll_min_{window_day}"] = grouped_shifted.transform(
+                lambda s: s.rolling(window_row, min_periods=1).min()
             )
-            out[f"{target_col}_roll_max_{window}"] = grouped_shifted.transform(
-                lambda s: s.rolling(window, min_periods=1).max()
+            out[f"{target_col}_roll_max_{window_day}"] = grouped_shifted.transform(
+                lambda s: s.rolling(window_row, min_periods=1).max()
             )
     else:
         shifted = out[target_col].shift(1)
-        for window in windows:
-            out[f"{target_col}_roll_mean_{window}"] = shifted.rolling(window, min_periods=1).mean()
-            out[f"{target_col}_roll_std_{window}"] = shifted.rolling(window, min_periods=1).std()
-            out[f"{target_col}_roll_min_{window}"] = shifted.rolling(window, min_periods=1).min()
-            out[f"{target_col}_roll_max_{window}"] = shifted.rolling(window, min_periods=1).max()
+        for window_day, window_row in zip(windows, window_rows):
+            out[f"{target_col}_roll_mean_{window_day}"] = shifted.rolling(window_row, min_periods=1).mean()
+            out[f"{target_col}_roll_std_{window_day}"] = shifted.rolling(window_row, min_periods=1).std()
+            out[f"{target_col}_roll_min_{window_day}"] = shifted.rolling(window_row, min_periods=1).min()
+            out[f"{target_col}_roll_max_{window_day}"] = shifted.rolling(window_row, min_periods=1).max()
 
     return out
 
