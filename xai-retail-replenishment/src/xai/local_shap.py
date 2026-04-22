@@ -84,7 +84,6 @@ def compute_local_shap(
         raise IndexError(f"idx must be between 0 and {len(X) - 1}.")
 
     x_row = X.iloc[[idx]]
-    background = X.sample(min(200, len(X)), random_state=42)
 
     # Prefer tree explainer on transformed features when using a sklearn pipeline.
     if hasattr(model, "named_steps") and "prep" in model.named_steps and "model" in model.named_steps:
@@ -118,6 +117,7 @@ def compute_local_shap(
         )
 
     # Generic fallback explainer for non-pipeline models.
+    background = X.sample(min(200, len(X)), random_state=42)
     explainer = shap.Explainer(model.predict, background)
     shap_raw = explainer(x_row)
     if hasattr(shap_raw, "__getitem__"):
@@ -172,6 +172,7 @@ def generate_local_explanation_text(
     shap_values: shap.Explanation,
     forecast_value: float,
     sku_id: str,
+    forecast_window: int = 7,
 ) -> str:
     """Generate a plain-English explanation for a single SKU forecast.
 
@@ -212,16 +213,16 @@ def generate_local_explanation_text(
     if typical is not None and typical != 0:
         forecast_pct = ((forecast_value - typical) / typical) * 100.0
 
-    roll14 = _value_for("num__sales_roll_mean_14", "sales_roll_mean_14")
-    roll28 = _value_for("num__sales_roll_mean_28", "sales_roll_mean_28")
+    roll7  = _value_for("num__sales_roll_mean_7",  "sales_roll_mean_7")
+    lag7   = _value_for("num__sales_lag_7",         "sales_lag_7")
     trend_txt = "insufficient data"
-    if roll14 is not None and roll28 is not None:
-        if abs(roll14 - roll28) <= 0.75:
-            trend_txt = f"stable (14-day avg {roll14:.1f}, 28-day avg {roll28:.1f})"
-        elif roll14 > roll28:
-            trend_txt = f"upward (14-day avg {roll14:.1f}, 28-day avg {roll28:.1f})"
+    if roll7 is not None and lag7 is not None:
+        if abs(roll7 - lag7) <= 0.75:
+            trend_txt = f"stable (7-day rolling avg {roll7:.1f}, lag-7 {lag7:.1f})"
+        elif roll7 > lag7:
+            trend_txt = f"upward (7-day rolling avg {roll7:.1f}, lag-7 {lag7:.1f})"
         else:
-            trend_txt = f"softening (14-day avg {roll14:.1f}, 28-day avg {roll28:.1f})"
+            trend_txt = f"softening (7-day rolling avg {roll7:.1f}, lag-7 {lag7:.1f})"
 
     discount_depth = _value_for("num__discount_depth", "discount_depth")
     promo_active = bool(discount_depth is not None and discount_depth > 0.05)
@@ -245,7 +246,7 @@ def generate_local_explanation_text(
     rounded_units = int(math.ceil(forecast_value))
     lines = [
         f"SKU: {sku_id}",
-        f"Forecast (next 28 days): {forecast_value:.1f} units ({rounded_units})",
+        f"Forecast (next {forecast_window} days): {forecast_value:.1f} units ({rounded_units})",
         f"This SKU's typical demand: ~{typical:.1f} units/period",
     ]
 

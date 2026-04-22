@@ -1,0 +1,122 @@
+/* ── DataTable sort arrow ────────────────────────────────────────────────── */
+
+/* Hide the default Font Awesome double-arrow SVG */
+.dash-header .column-header--sort svg {
+    display: none;
+}
+
+/* Unsorted: faint bidirectional hint */
+.dash-header .column-header--sort::after {
+    content: "↕";
+    font-size: 11px;
+    opacity: 0.30;
+    margin-left: 4px;
+    vertical-align: middle;
+    transition: opacity 0.15s;
+}
+
+/* Hover: slightly more visible */
+.dash-header:hover .column-header--sort::after {
+    opacity: 0.65;
+}
+
+/* Ascending */
+.dash-header.sort-ascending .column-header--sort::after {
+    content: "↑";
+    opacity: 1;
+}
+
+/* Descending */
+.dash-header.sort-descending .column-header--sort::after {
+    content: "↓";
+    opacity: 1;
+}
+
+/* ── Input group text ($ prefix) dark mode ──────────────────────────────── */
+
+.dark-mode .input-group-text {
+    background-color: #1a1d2e;
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #e0e0e0;
+}
+
+.dark-mode .input-group .form-control {
+    background-color: #0f1225;
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #e0e0e0;
+}
+
+.dark-mode .input-group .form-control:focus {
+    background-color: #0f1225;
+    border-color: rgba(123, 97, 255, 0.6);
+    color: #e0e0e0;
+    box-shadow: 0 0 0 0.2rem rgba(123, 97, 255, 0.2);
+}
+
+.dark-mode input[type="number"]::-webkit-inner-spin-button,
+.dark-mode input[type="number"]::-webkit-outer-spin-button {
+    filter: invert(1);
+    opacity: 0.6;
+}
+
+/* ── Hide slider numeric input boxes ────────────────────────────────────── */
+
+.dash-range-slider-input {
+    display: none !important;
+}
+
+/* ── Slider visibility in dark mode ─────────────────────────────────────── */
+
+.dark-mode .dash-slider-track {
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+.dark-mode .dash-slider-range {
+    background-color: #7B61FF;
+}
+
+.dark-mode .dash-slider-thumb {
+    background-color: #7B61FF;
+    border: 2px solid #7B61FF;
+    box-shadow: 0 0 0 3px rgba(123, 97, 255, 0.25);
+}
+
+.dark-mode .dash-slider-mark {
+    color: rgba(255, 255, 255, 0.55);
+}
+
+/* ── Purple toggle switch (SNAP eligibility) ─────────────────────────────── */
+
+/* Off state — transparent track */
+#whatif-snap {
+    background-color: transparent;
+    border-color: rgba(123, 97, 255, 0.6);
+    cursor: pointer;
+}
+
+/* On state — full purple */
+#whatif-snap:checked {
+    background-color: #7B61FF;
+    border-color: #7B61FF;
+}
+
+/* Focus ring */
+#whatif-snap:focus {
+    box-shadow: 0 0 0 0.2rem rgba(123, 97, 255, 0.3);
+    border-color: #7B61FF;
+}
+
+/* ── Sweep chart tabs — purple text ─────────────────────────────────────── */
+
+#whatif-sweep-tabs .nav-link {
+    color: rgba(123, 97, 255, 0.55);
+}
+
+#whatif-sweep-tabs .nav-link:hover {
+    color: #7B61FF;
+}
+
+#whatif-sweep-tabs .nav-link.active {
+    color: #7B61FF;
+    border-bottom-color: transparent;
+}

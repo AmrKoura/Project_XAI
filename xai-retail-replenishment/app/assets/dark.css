@@ -1,0 +1,189 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Neon dark mode — applied when <body> has class "dark-mode"
+   Palette:
+     BG page        #0B0D1B
+     BG card        #0F1225
+     BG card header #0A0C1A
+     Accent purple  #5F01FB
+     Muted purple   #514A85
+     Text           #FFFFFF
+     Neon danger    #FF2D55
+     Neon success   #00FF87
+     Neon warning   #FFB800
+     Neon info      #00D4FF
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Base ── */
+body.dark-mode {
+    background-color: #0B0D1B !important;
+    color: #FFFFFF !important;
+}
+
+body.dark-mode #page-content {
+    background-color: #0B0D1B !important;
+}
+
+/* ── Cards ── */
+body.dark-mode .card {
+    background-color: #0F1225 !important;
+    border: 1px solid rgba(95, 1, 251, 0.35) !important;
+    color: #FFFFFF !important;
+}
+body.dark-mode .card-header {
+    background-color: #0A0C1A !important;
+    border-bottom: 1px solid rgba(95, 1, 251, 0.35) !important;
+    color: #FFFFFF !important;
+}
+body.dark-mode .card-body {
+    background-color: #0F1225 !important;
+}
+body.dark-mode .shadow-sm {
+    box-shadow: 0 2px 12px rgba(95, 1, 251, 0.25) !important;
+}
+
+/* ── Typography ── */
+body.dark-mode h1, body.dark-mode h2, body.dark-mode h3,
+body.dark-mode h4, body.dark-mode h5, body.dark-mode h6,
+body.dark-mode label, body.dark-mode small,
+body.dark-mode .form-label { color: #FFFFFF !important; }
+
+body.dark-mode h3:not([class*="text-"]),
+body.dark-mode h4:not([class*="text-"]),
+body.dark-mode h5:not([class*="text-"]) { color: #FFFFFF !important; }
+
+body.dark-mode .text-muted   { color: rgba(255, 255, 255, 0.50) !important; }
+body.dark-mode .text-dark    { color: #FFFFFF !important; }
+body.dark-mode .text-light   { color: #FFFFFF !important; }
+
+/* ── Neon semantic colours ── */
+body.dark-mode .text-danger  { color: #FF2D55 !important; }
+body.dark-mode .text-success { color: #00FF87 !important; }
+body.dark-mode .text-warning { color: #FFB800 !important; }
+body.dark-mode .text-info    { color: #00D4FF !important; }
+body.dark-mode .text-primary { color: #5F01FB !important; }
+
+/* ── Badges ── */
+body.dark-mode .badge.bg-danger   { background-color: #FF2D55 !important; color: #FFFFFF !important; }
+body.dark-mode .badge.bg-success  { background-color: #00FF87 !important; color: #0B0D1B !important; }
+body.dark-mode .badge.bg-warning  { background-color: #FFB800 !important; color: #0B0D1B !important; }
+body.dark-mode .badge.bg-info     { background-color: #00D4FF !important; color: #0B0D1B !important; }
+body.dark-mode .badge.bg-primary  { background-color: #5F01FB !important; color: #FFFFFF !important; }
+body.dark-mode .badge.bg-secondary{ background-color: #514A85 !important; color: #FFFFFF !important; }
+
+/* ── Buttons ── */
+body.dark-mode .btn-link { color: #FFFFFF !important; }
+
+/* ── Form controls ── */
+body.dark-mode .form-select,
+body.dark-mode .form-control {
+    background-color: #0F1225 !important;
+    color: #FFFFFF !important;
+    border-color: rgba(95, 1, 251, 0.45) !important;
+}
+body.dark-mode .form-select option {
+    background-color: #0F1225;
+    color: #FFFFFF;
+}
+
+/* ── Dividers ── */
+body.dark-mode hr {
+    border-color: rgba(95, 1, 251, 0.3) !important;
+    opacity: 1 !important;
+}
+
+/* ── dcc.Dropdown (Dash 4 class names) ── */
+body.dark-mode .dash-dropdown,
+body.dark-mode .dash-dropdown-wrapper,
+body.dark-mode .dash-dropdown-trigger,
+body.dark-mode .dash-dropdown-grid-container {
+    background-color: #0F1225 !important;
+    color: #FFFFFF !important;
+    border-color: rgba(95, 1, 251, 0.45) !important;
+}
+body.dark-mode .dash-dropdown-value,
+body.dark-mode .dash-dropdown-placeholder,
+body.dark-mode .dash-dropdown-value-item { color: #FFFFFF !important; }
+body.dark-mode .dash-dropdown-content,
+body.dark-mode .dash-dropdown-options {
+    background-color: #0F1225 !important;
+    border-color: rgba(95, 1, 251, 0.45) !important;
+}
+body.dark-mode .dash-dropdown-option {
+    background-color: #0F1225 !important;
+    color: #FFFFFF !important;
+}
+body.dark-mode .dash-dropdown-option:hover {
+    background-color: rgba(95, 1, 251, 0.25) !important;
+}
+body.dark-mode .dash-dropdown-search input,
+body.dark-mode .dash-dropdown input {
+    background-color: #0F1225 !important;
+    color: #FFFFFF !important;
+}
+body.dark-mode .dash-dropdown-trigger-icon {
+    color: #FFFFFF !important;
+    fill: #FFFFFF !important;
+}
+
+/* ── Model dropdown in navbar ── */
+body.dark-mode #model-dropdown {
+    background-color: rgba(95, 1, 251, 0.15) !important;
+    color: #FFFFFF !important;
+    border-color: rgba(95, 1, 251, 0.5) !important;
+}
+
+/* ── DataTable structural elements ── */
+body.dark-mode .dash-table-container .previous-next-container button,
+body.dark-mode .dash-table-container .page-number {
+    background-color: #0F1225 !important;
+    color: #FFFFFF !important;
+    border-color: rgba(95, 1, 251, 0.35) !important;
+}
+body.dark-mode input.current-page,
+body.dark-mode .dash-table-container input[type="number"],
+body.dark-mode .dash-table-container .dash-spreadsheet input {
+    color: #FFFFFF !important;
+    background-color: #0F1225 !important;
+    border-color: rgba(95, 1, 251, 0.35) !important;
+}
+body.dark-mode .dash-table-container .dash-filter input {
+    background-color: #0A0C1A !important;
+    color: #FFFFFF !important;
+    border-color: rgba(95, 1, 251, 0.35) !important;
+}
+
+/* ── Tooltip ── */
+body.dark-mode .dash-tooltip,
+body.dark-mode .dash-tooltip *,
+body.dark-mode td.dash-tooltip,
+body.dark-mode .dash-table-tooltip,
+body.dark-mode [class*="tooltip"] {
+    background-color: #0A0C1A !important;
+    color: #FFFFFF !important;
+    border: 1px solid rgba(95, 1, 251, 0.5) !important;
+    border-radius: 4px !important;
+}
+
+/* ── Bootstrap tables ── */
+body.dark-mode .table {
+    color: #FFFFFF !important;
+    border-color: rgba(95, 1, 251, 0.2) !important;
+}
+body.dark-mode .table td,
+body.dark-mode .table th {
+    background-color: #0F1225 !important;
+    color: #FFFFFF !important;
+    border-color: rgba(95, 1, 251, 0.2) !important;
+}
+body.dark-mode .table thead th {
+    background-color: #0A0C1A !important;
+    color: rgba(255, 255, 255, 0.75) !important;
+    border-color: rgba(95, 1, 251, 0.35) !important;
+}
+body.dark-mode .table-sm td,
+body.dark-mode .table-sm th { background-color: #0F1225 !important; }
+
+/* ── Loading spinner ── */
+body.dark-mode ._dash-loading {
+    background-color: rgba(11, 13, 27, 0.85) !important;
+}

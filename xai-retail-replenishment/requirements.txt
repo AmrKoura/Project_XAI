@@ -25,9 +25,11 @@ dash-bootstrap-components>=1.5.0
 plotly>=5.18.0
 
 # =============================================================================
-# NLP / Natural Language Generation
+# Report Generation
 # =============================================================================
-# jinja2>=3.1.0              # For template-based NLG (uncomment if needed)
+kaleido>=0.2.1               # Plotly static image export (charts → PNG)
+reportlab>=4.0.0             # A4 PDF generation
+python-docx>=1.0.0           # DOCX generation
 
 # =============================================================================
 # Utilities
