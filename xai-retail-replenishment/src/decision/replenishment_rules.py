@@ -88,6 +88,7 @@ def generate_replenishment_card(
     stock_on_hand: float,
     lead_time_days: int,
     safety_stock: float,
+    forecast_horizon: int = 7,
 ) -> dict:
     """Build a replenishment summary card for a single SKU.
 
@@ -99,6 +100,8 @@ def generate_replenishment_card(
     stock_on_hand : float
     lead_time_days : int
     safety_stock : float
+    forecast_horizon : int
+        Number of days the forecast covers (7, 14, or 28).
 
     Returns
     -------
@@ -113,19 +116,27 @@ def generate_replenishment_card(
     q10 = float(forecast["q10"])
     q90 = float(forecast["q90"])
 
-    avg_daily = q50 / 7.0
-    rop        = compute_reorder_point(avg_daily, lead_time_days, safety_stock)
+    # avg daily demand = window forecast / window size
+    avg_daily   = q50 / float(forecast_horizon) if forecast_horizon > 0 else 0.0
+    rop         = compute_reorder_point(avg_daily, lead_time_days, safety_stock)
     reorder_qty = compute_reorder_quantity(q50, safety_stock, stock_on_hand)
     trigger     = should_reorder(stock_on_hand, rop)
 
-    # Urgency: driven by how many units need to be ordered
+    # When a reorder is triggered but qty is 0, order at least the forecast
+    # amount — stock is at its minimum threshold so a full replenishment is needed
+    if trigger and reorder_qty == 0:
+        reorder_qty = int(math.ceil(q50))
+
     days_of_stock = (stock_on_hand / avg_daily) if avg_daily > 0 else float("inf")
-    if reorder_qty == 0:
-        urgency = "LOW"
-    elif reorder_qty <= 10:
-        urgency = "HIGH"
+
+    # Urgency tied directly to the Order Now trigger so the three columns
+    # are always consistent with each other
+    if trigger and days_of_stock < lead_time_days:
+        urgency = "CRITICAL"   # order now AND stock runs out before delivery
+    elif trigger:
+        urgency = "HIGH"       # order now but stock still covers lead time
     else:
-        urgency = "CRITICAL"
+        urgency = "LOW"        # above reorder point — no action needed
 
     # Confidence band width as % of median forecast
     band_width = q90 - q10

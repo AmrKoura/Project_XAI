@@ -39,7 +39,7 @@ _NEON_LAYOUT = dict(
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _clean(name: str) -> str:
-    return name.replace("num__", "").replace("cat__", "")
+    return ds.feature_label(name)
 
 
 def _section_label(text: str) -> html.P:
@@ -59,9 +59,25 @@ def _bullet_list(items: list) -> html.Ul:
 def _global_shap_figure(dark: bool = False) -> go.Figure:
     df = ds.global_shap_df
     if df is None or df.empty:
-        return go.Figure()
+        fig = go.Figure()
+        if ds.current_model_type == "neural_network":
+            fig.add_annotation(
+                text="Global SHAP is not available for Neural Networks.<br>Switch to LightGBM, XGBoost, or Random Forest.",
+                xref="paper", yref="paper", x=0.5, y=0.5,
+                showarrow=False, font=dict(size=14, color="#6c757d"),
+                align="center",
+            )
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(visible=False), yaxis=dict(visible=False),
+                margin=dict(t=20, b=20, l=20, r=20),
+            )
+        return fig
 
     top = df.head(15).copy()
+    top["rank"] = range(1, len(top) + 1)
+    total_shap   = float(df["mean_abs_shap"].sum()) or 1.0
+    top["share"] = top["mean_abs_shap"] / total_shap * 100
     top["feature_clean"] = top["feature"].apply(_clean)
     top = top.sort_values("mean_abs_shap", ascending=True)
 
@@ -69,102 +85,142 @@ def _global_shap_figure(dark: bool = False) -> go.Figure:
     text_color   = _NEON_FONT    if dark else "#333333"
     layout_extra = _NEON_LAYOUT  if dark else {"template": "plotly_white"}
 
+    hover = [
+        f"<b>#{int(r['rank'])} — {r['feature_clean']}</b><br>"
+        f"On average, shifts the forecast by ±{r['mean_abs_shap']:.1f} units<br>"
+        f"Accounts for {r['share']:.1f}% of total model influence"
+        for _, r in top.iterrows()
+    ]
+
     fig = go.Figure(go.Bar(
         x=top["mean_abs_shap"],
         y=top["feature_clean"],
         orientation="h",
         marker_color=bar_color,
-        text=[f"{v:.3f}" for v in top["mean_abs_shap"]],
+        text=[f"{v:.2f}" for v in top["mean_abs_shap"]],
         textposition="outside",
         textfont={"color": text_color},
-        hovertemplate="<b>%{y}</b><br>Mean |SHAP|: %{x:.4f}<extra></extra>",
+        customdata=hover,
+        hovertemplate="%{customdata}<extra></extra>",
     ))
 
     fig.update_layout(
         **layout_extra,
         margin={"t": 20, "b": 20, "l": 20, "r": 70},
-        xaxis_title="Mean |SHAP value|",
+        xaxis_title="Average impact on forecast (units)",
         yaxis_automargin=True,
         showlegend=False,
     )
     return fig
 
 
-# ── Q2 — Global SHAP NLG card ─────────────────────────────────────────────────
+# ── Combined Feature Intelligence NLG ────────────────────────────────────────
 
-def _global_shap_nlg() -> html.Div:
-    df = ds.global_shap_df
-    if df is None or df.empty:
-        return html.P("No data available.", className="text-muted")
+def _combined_nlg() -> html.Div:
+    shap_df  = ds.global_shap_df
+    audit_df = ds.feature_audit_df
 
-    top5       = df.head(5)
+    if shap_df is None or shap_df.empty:
+        if ds.current_model_type == "neural_network":
+            return html.P("SHAP analysis not available for Neural Networks.",
+                          className="text-muted", style={"fontSize": "13px"})
+        return html.P("Visit this page to compute SHAP (first visit may take ~30s).",
+                      className="text-muted", style={"fontSize": "13px"})
+
+    total_shap = float(shap_df["mean_abs_shap"].sum()) or 1.0
+    top5       = shap_df.head(5)
     top_names  = [_clean(f) for f in top5["feature"]]
-    top_vals   = top5["mean_abs_shap"].tolist()
-    total_shap = float(df["mean_abs_shap"].sum())
-    top5_share = float(top5["mean_abs_shap"].sum()) / total_shap * 100 if total_shap > 0 else 0.0
+    top5_share = float(top5["mean_abs_shap"].sum()) / total_shap * 100
 
-    lag_feats   = [f for f in top_names if "lag" in f or "roll" in f]
-    price_feats = [f for f in top_names if "price" in f or "discount" in f]
-    event_feats = [f for f in top_names if "event" in f]
+    # ── Cross-reference with audit ────────────────────────────────────────────
+    risky_features = []
+    if audit_df is not None and not audit_df.empty:
+        shap_clean = shap_df.copy()
+        shap_clean["feature_raw"] = shap_clean["feature"].str.replace(
+            r"^(num__|cat__)", "", regex=True
+        )
+        p67 = shap_df["mean_abs_shap"].quantile(0.67)
 
-    if len(lag_feats) >= 2:
-        driver_txt = "recent sales history"
-    elif len(price_feats) >= 2:
-        driver_txt = "pricing and promotion signals"
-    elif len(event_feats) >= 2:
-        driver_txt = "event and holiday indicators"
+        for _, row in audit_df.iterrows():
+            if row["flag"] == "ok":
+                continue
+            raw = row["feature"]
+            match = shap_clean[shap_clean["feature_raw"] == raw]
+            if not match.empty and float(match.iloc[0]["mean_abs_shap"]) >= p67:
+                risky_features.append((_clean(raw), row["flag"]))
+
+        total_features = len(audit_df)
+        flagged = int((audit_df["flag"] != "ok").sum())
     else:
-        driver_txt = "a mix of lag, price, and contextual signals"
+        total_features, flagged = 0, 0
 
-    bottom5_names = [_clean(f) for f in df.tail(5)["feature"]]
+    # ── Build NLG ────────────────────────────────────────────────────────────
+    blocks = []
 
-    feature_items = [
-        html.Li([
-            html.Strong(f"{i}. {name}"),
-            html.Span(
-                f"  ({val:.3f})",
-                className="text-muted",
-                style={"fontSize": "12px"},
-            ),
-        ])
-        for i, (name, val) in enumerate(zip(top_names, top_vals), 1)
+    # Key drivers
+    blocks += [
+        _section_label("What drives demand?"),
+        _bullet_list([
+            html.Li([
+                html.Strong(f"{i}. {name}"),
+                html.Span(f" — {v:.1f}% of model influence",
+                           className="text-muted", style={"fontSize": "12px"}),
+            ])
+            for i, (name, v) in enumerate(
+                zip(top_names,
+                    [float(r["mean_abs_shap"]) / total_shap * 100
+                     for _, r in top5.iterrows()]),
+                1,
+            )
+        ]),
+        html.P(
+            [f"Together the top 5 features account for ",
+             html.Strong(f"{top5_share:.0f}%"), " of total model influence."],
+            style={"fontSize": "13px"}, className="mt-2 mb-0",
+        ),
     ]
 
-    return html.Div([
-        _section_label("Key Driver"),
-        html.P(
-            f"Demand forecasts are primarily driven by {driver_txt}.",
-            style={"fontSize": "13px"},
-            className="mb-2",
-        ),
+    # Data health
+    if total_features > 0:
+        health_colour = "success" if flagged == 0 else ("warning" if flagged <= 3 else "danger")
+        blocks += [
+            html.Hr(style={"margin": "10px 0"}),
+            _section_label("Data health"),
+            html.P([
+                html.Strong(f"{total_features - flagged} / {total_features}"),
+                " features pass the quality audit. ",
+                dbc.Badge(f"{flagged} flagged", color=health_colour, className="ms-1"),
+            ], style={"fontSize": "13px"}, className="mb-0"),
+        ]
 
-        html.Hr(style={"margin": "10px 0"}),
+    # Action items
+    blocks.append(html.Hr(style={"margin": "10px 0"}))
+    if risky_features:
+        items = [
+            html.Li([
+                html.Strong(feat),
+                html.Span(f" — {flag.replace('_', ' ')} but high model reliance",
+                           className="text-muted", style={"fontSize": "12px"}),
+            ])
+            for feat, flag in risky_features
+        ]
+        blocks += [
+            _section_label("⚠ Action items"),
+            html.P("These features have data quality issues the model relies on heavily:",
+                   style={"fontSize": "13px"}, className="mb-1"),
+            _bullet_list(items),
+        ]
+    else:
+        blocks += [
+            _section_label("✓ No critical issues"),
+            html.P(
+                "All high-importance features have clean data. "
+                "The model's core reasoning is on solid ground.",
+                style={"fontSize": "13px"}, className="mb-0",
+            ),
+        ]
 
-        _section_label("Top 5 Features"),
-        _bullet_list(feature_items),
-
-        html.Hr(style={"margin": "10px 0"}),
-
-        _section_label("SHAP Coverage"),
-        html.P(
-            [
-                f"Top 5 features account for ",
-                html.Strong(f"{top5_share:.1f}%"),
-                f" of total model influence across all {len(df)} features.",
-            ],
-            style={"fontSize": "13px"},
-            className="mb-2",
-        ),
-
-        html.Hr(style={"margin": "10px 0"}),
-
-        _section_label("Lowest Impact"),
-        html.P(
-            ", ".join(bottom5_names),
-            className="text-muted mb-0",
-            style={"fontSize": "12px"},
-        ),
-    ])
+    return html.Div(blocks)
 
 
 # ── Q8 — Audit summary cards ──────────────────────────────────────────────────
@@ -200,10 +256,12 @@ def _audit_summary_cards(dark: bool = False) -> html.Div:
 # ── Q8 — Audit DataTable ──────────────────────────────────────────────────────
 
 _AUDIT_COL_TOOLTIPS = {
-    "feature":     "The name of the input feature used by the model",
-    "std":         "Standard deviation of this feature across the test set — how much the values vary. Zero means the feature is constant and carries no information",
-    "missing_pct": "Percentage of rows where this feature's value is missing (NaN). Values above 10% are flagged",
-    "flag":        "Data quality verdict. ok = healthy. zero_variance = constant column. mostly_zero = over 80% of values are 0. high_corr = nearly identical to another feature (>0.95 correlation). high_missing = too many missing values",
+    "feature":    "The name of the input feature used by the model",
+    "flag":       "Data quality verdict: ok = healthy | zero_variance = constant (no info) | mostly_zero = >80% zeros | high_corr = near-duplicate of another feature | high_missing = >10% missing",
+    "reliance":   "How much the model relies on this feature based on its average SHAP contribution. High = top third, Medium = middle, Low = bottom third. Only available for tree-based models.",
+    "risk":       "Combined verdict: Safe = no quality issue OR model ignores it. Risky = quality issue AND model relies on it heavily — this is the most important flag to act on.",
+    "missing_pct":"Percentage of rows where this feature's value is missing (NaN)",
+    "std":        "Standard deviation across the test set — how much the feature varies. Zero = constant column (no information for the model)",
 }
 
 
@@ -214,15 +272,54 @@ def _audit_table(dark: bool = False, df: pd.DataFrame = None) -> dash_table.Data
         return html.P("No audit data available.", className="text-muted")
 
     display = df.copy()
+
+    # ── Cross-reference with Global SHAP ─────────────────────────────────────
+    shap_df = ds.global_shap_df
+    if shap_df is not None and not shap_df.empty:
+        shap_clean = shap_df.copy()
+        # Strip sklearn prefixes so names match the audit feature names
+        shap_clean["feature"] = shap_clean["feature"].str.replace(
+            r"^(num__|cat__)", "", regex=True
+        )
+        shap_clean = shap_clean[["feature", "mean_abs_shap"]].drop_duplicates("feature")
+
+        # Relative thresholds: top/middle/bottom third
+        p33 = shap_clean["mean_abs_shap"].quantile(0.33)
+        p67 = shap_clean["mean_abs_shap"].quantile(0.67)
+
+        def _reliance(v):
+            if v >= p67: return "High"
+            if v >= p33: return "Medium"
+            return "Low"
+
+        shap_clean["reliance"] = shap_clean["mean_abs_shap"].apply(_reliance)
+        display = display.merge(shap_clean[["feature", "reliance"]], on="feature", how="left")
+        display["reliance"] = display["reliance"].fillna("N/A")
+    else:
+        display["reliance"] = "N/A"
+
+    # ── Risk column: quality flag × model reliance ────────────────────────────
+    def _risk(row):
+        if row["flag"] == "ok":
+            return "✓ Safe"
+        if row["reliance"] == "High":
+            return "⚠ Risky"
+        if row["reliance"] == "Medium":
+            return "~ Moderate"
+        return "✓ Safe"   # flagged but Low reliance → model ignores it
+
+    display["risk"] = display.apply(_risk, axis=1)
     display["feature"] = display["feature"].apply(_clean)
 
     columns = [
-        {"name": "Feature",   "id": "feature"},
-        {"name": "Std Dev",   "id": "std",         "type": "numeric",
-         "format": {"specifier": ".4f"}},
-        {"name": "Missing %", "id": "missing_pct", "type": "numeric",
+        {"name": "Feature",        "id": "feature"},
+        {"name": "Status",         "id": "flag"},
+        {"name": "Model Reliance", "id": "reliance"},
+        {"name": "Risk",           "id": "risk"},
+        {"name": "Missing %",      "id": "missing_pct", "type": "numeric",
          "format": {"specifier": ".1f"}},
-        {"name": "Status",    "id": "flag"},
+        {"name": "Std Dev",        "id": "std",         "type": "numeric",
+         "format": {"specifier": ".3f"}},
     ]
 
     if dark:
@@ -242,16 +339,18 @@ def _audit_table(dark: bool = False, df: pd.DataFrame = None) -> dash_table.Data
             "backgroundColor": "#0F1225", "color": "#FFFFFF",
         }
         s_cond = [
-            {"if": {"filter_query": '{flag} = "ok"'},
-             "backgroundColor": "rgba(0,255,135,0.08)", "color": "#00FF87"},
-            {"if": {"filter_query": '{flag} contains "zero_variance"'},
-             "backgroundColor": "rgba(255,45,85,0.12)", "color": "#FF2D55"},
-            {"if": {"filter_query": '{flag} contains "high_missing"'},
-             "backgroundColor": "rgba(255,45,85,0.12)", "color": "#FF2D55"},
-            {"if": {"filter_query": '{flag} contains "high_corr"'},
-             "backgroundColor": "rgba(255,184,0,0.12)", "color": "#FFB800"},
-            {"if": {"filter_query": '{flag} contains "mostly_zero"'},
-             "backgroundColor": "rgba(255,184,0,0.12)", "color": "#FFB800"},
+            {"if": {"filter_query": '{risk} = "⚠ Risky"',  "column_id": "risk"},
+             "backgroundColor": "rgba(255,45,85,0.15)",  "color": "#FF2D55", "fontWeight": "bold"},
+            {"if": {"filter_query": '{risk} = "~ Moderate"', "column_id": "risk"},
+             "backgroundColor": "rgba(255,184,0,0.12)", "color": "#FFB800", "fontWeight": "bold"},
+            {"if": {"filter_query": '{risk} = "✓ Safe"',  "column_id": "risk"},
+             "backgroundColor": "rgba(0,255,135,0.08)",  "color": "#00FF87"},
+            {"if": {"filter_query": '{reliance} = "High"',   "column_id": "reliance"},
+             "color": "#FF2D55"},
+            {"if": {"filter_query": '{reliance} = "Medium"', "column_id": "reliance"},
+             "color": "#FFB800"},
+            {"if": {"filter_query": '{reliance} = "Low"',    "column_id": "reliance"},
+             "color": "#00FF87"},
         ]
     else:
         s_header = {
@@ -263,22 +362,24 @@ def _audit_table(dark: bool = False, df: pd.DataFrame = None) -> dash_table.Data
         s_data = {}
         s_cell = {"fontSize": "13px", "padding": "6px 10px", "textAlign": "left"}
         s_cond = [
-            {"if": {"filter_query": '{flag} = "ok"'},
+            {"if": {"filter_query": '{risk} = "⚠ Risky"',  "column_id": "risk"},
+             "backgroundColor": "#f8d7da", "color": "#842029", "fontWeight": "bold"},
+            {"if": {"filter_query": '{risk} = "~ Moderate"', "column_id": "risk"},
+             "backgroundColor": "#fff3cd", "color": "#664d03", "fontWeight": "bold"},
+            {"if": {"filter_query": '{risk} = "✓ Safe"',  "column_id": "risk"},
              "backgroundColor": "#d1e7dd", "color": "#0a3622"},
-            {"if": {"filter_query": '{flag} contains "zero_variance"'},
-             "backgroundColor": "#f8d7da", "color": "#842029"},
-            {"if": {"filter_query": '{flag} contains "high_missing"'},
-             "backgroundColor": "#f8d7da", "color": "#842029"},
-            {"if": {"filter_query": '{flag} contains "high_corr"'},
-             "backgroundColor": "#fff3cd", "color": "#664d03"},
-            {"if": {"filter_query": '{flag} contains "mostly_zero"'},
-             "backgroundColor": "#fff3cd", "color": "#664d03"},
+            {"if": {"filter_query": '{reliance} = "High"',   "column_id": "reliance"},
+             "color": "#dc3545", "fontWeight": "600"},
+            {"if": {"filter_query": '{reliance} = "Medium"', "column_id": "reliance"},
+             "color": "#856404", "fontWeight": "600"},
+            {"if": {"filter_query": '{reliance} = "Low"',    "column_id": "reliance"},
+             "color": "#0a3622", "fontWeight": "600"},
         ]
 
     return dash_table.DataTable(
         id="audit-datatable",
         columns=columns,
-        data=display[["feature", "std", "missing_pct", "flag"]].to_dict("records"),
+        data=display[["feature", "flag", "reliance", "risk", "missing_pct", "std"]].to_dict("records"),
         page_size=20,
         sort_action="native",
         tooltip_header={col["id"]: _AUDIT_COL_TOOLTIPS.get(col["id"], "") for col in columns},
@@ -703,106 +804,136 @@ def _stockout_nlg(sku_id: str) -> html.Div:
 # ── Q9 — Model Reliability & Cold-Start ──────────────────────────────────────
 
 def _reliability_stat_cards(dark: bool = False) -> html.Div:
-    total_colour = "light" if dark else "dark"
-    n_cold       = int(ds.cold_start_df["is_cold_start"].sum()) if ds.cold_start_df is not None else 0
-    n_total      = len(ds.cold_start_df) if ds.cold_start_df is not None else 0
-    n_estab      = n_total - n_cold
-    coverage     = ds.interval_coverage or 0.0
-    cov_colour   = "success" if coverage >= 75 else "warning" if coverage >= 65 else "danger"
-    high_n       = ds.confidence_dist.get("high", 0)
+    coverage   = ds.interval_coverage or 0.0
+    cov_colour = "success" if coverage >= 75 else "warning" if coverage >= 65 else "danger"
 
-    def _stat(value, label, colour):
-        return dbc.Col(
-            dbc.Card([
-                dbc.CardBody([
-                    html.H3(str(value), className=f"text-{colour} mb-0"),
-                    html.Small(label, className="text-muted"),
-                ], style={"padding": "14px 18px"}),
-            ], className="shadow-sm text-center"),
-            xs=6, md=3,
-        )
+    # Compute overall weighted MAE and BIAS from subgroup table
+    df = ds.subgroup_eval_df
+    if df is not None and not df.empty and "n" in df.columns:
+        total_n    = df["n"].sum() or 1
+        overall_mae  = float((df["MAE"]  * df["n"]).sum() / total_n)
+        overall_bias = float((df["BIAS"] * df["n"]).sum() / total_n)
+    else:
+        overall_mae, overall_bias = None, None
 
-    dash_style = {
-        "textDecoration": "underline",
-        "textDecorationStyle": "dashed",
-        "textDecorationColor": "rgba(108,117,125,0.7)",
-        "cursor": "help",
+    _dash = {
+        "textDecoration": "underline", "textDecorationStyle": "dashed",
+        "textDecorationColor": "rgba(108,117,125,0.7)", "cursor": "help",
     }
 
-    coverage_col = dbc.Col(
-        [
-            dbc.Card([
-                dbc.CardBody([
-                    html.H3(f"{coverage:.1f}%", className=f"text-{cov_colour} mb-0"),
-                    html.Small(
-                        "Interval Coverage (target 80%)",
-                        id="coverage-label-tip",
-                        className="text-muted",
-                        style=dash_style,
-                    ),
-                ], style={"padding": "14px 18px"}),
-            ], className="shadow-sm text-center"),
-            dbc.Tooltip(
-                [
-                    html.P(
-                        "What % of actual sales fell inside the model's predicted 80% range "
-                        "(between q10 and q90). A well-calibrated model should hit ~80%.",
-                        className="mb-2",
-                        style={"fontSize": "12px"},
-                    ),
-                    html.Ul([
-                        html.Li("≈ 80% → model uncertainty is well-calibrated", style={"fontSize": "12px"}),
-                        html.Li("Much > 80% → intervals are too wide (over-cautious)", style={"fontSize": "12px"}),
-                        html.Li("Much < 80% → model is under-estimating uncertainty", style={"fontSize": "12px"}),
-                    ], className="mb-0 ps-3"),
-                ],
-                target="coverage-label-tip",
-                placement="bottom",
-                style={"maxWidth": "340px", "textAlign": "left"},
-            ),
-        ],
-        xs=6, md=3,
-    )
+    # ── Card 1: Interval Coverage ────────────────────────────────────────────
+    cov_col = dbc.Col([
+        dbc.Card([dbc.CardBody([
+            html.H3(f"{coverage:.1f}%", className=f"text-{cov_colour} mb-0"),
+            html.Small("Interval Coverage", id="coverage-label-tip",
+                       className="text-muted", style=_dash),
+        ], style={"padding": "14px 18px"})], className="shadow-sm text-center"),
+        dbc.Tooltip([
+            html.P("% of actual sales that fell inside the model's 80% prediction band. "
+                   "A well-calibrated model should be close to 80%.",
+                   className="mb-2", style={"fontSize": "12px"}),
+            html.Ul([
+                html.Li("≈ 80% → intervals are well-calibrated", style={"fontSize": "12px"}),
+                html.Li("Much < 80% → intervals too narrow — model is overconfident", style={"fontSize": "12px"}),
+                html.Li("Much > 80% → intervals too wide — model is over-cautious", style={"fontSize": "12px"}),
+            ], className="mb-0 ps-3"),
+        ], target="coverage-label-tip", placement="bottom",
+           style={"maxWidth": "340px", "textAlign": "left"}),
+    ], xs=6, md=4)
 
-    return dbc.Row([
-        coverage_col,
-        _stat(n_cold,  "Cold-Start SKUs",            "danger" if n_cold > 0 else "success"),
-        _stat(n_estab, "Established SKUs",            total_colour),
-        _stat(high_n,  "High-Confidence Predictions", "success"),
-    ], className="g-3")
+    # ── Card 2: Overall MAE ──────────────────────────────────────────────────
+    mae_val  = f"{overall_mae:.1f} units" if overall_mae is not None else "N/A"
+    mae_col  = dbc.Col([
+        dbc.Card([dbc.CardBody([
+            html.H3(mae_val, className="text-dark mb-0" if not dark else "text-light mb-0"),
+            html.Small("Avg. Error per Week (MAE)", id="mae-label-tip",
+                       className="text-muted", style=_dash),
+        ], style={"padding": "14px 18px"})], className="shadow-sm text-center"),
+        dbc.Tooltip(
+            "On average, the model's forecast is off by this many units per week. "
+            "Lower is better. Compare against typical sales volume to judge significance.",
+            target="mae-label-tip", placement="bottom",
+        ),
+    ], xs=6, md=4)
+
+    # ── Card 3: Systematic Bias ──────────────────────────────────────────────
+    if overall_bias is not None:
+        if abs(overall_bias) < 0.5:
+            bias_label, bias_colour = "BALANCED", "success"
+        elif overall_bias > 0:
+            bias_label, bias_colour = "OVER-FORECASTING", "warning"
+        else:
+            bias_label, bias_colour = "UNDER-FORECASTING", "warning"
+        bias_val = html.Div([
+            dbc.Badge(bias_label, color=bias_colour, className="mb-1",
+                      style={"fontSize": "13px"}),
+            html.Br(),
+            html.Small(f"avg {overall_bias:+.2f} units/week",
+                       className="text-muted", style={"fontSize": "11px"}),
+        ])
+    else:
+        bias_val, bias_colour = html.Span("N/A"), "secondary"
+
+    bias_col = dbc.Col([
+        dbc.Card([dbc.CardBody([
+            bias_val,
+            html.Small("Systematic Bias", id="bias-label-tip",
+                       className="text-muted d-block", style=_dash),
+        ], style={"padding": "14px 18px"})], className="shadow-sm text-center"),
+        dbc.Tooltip(
+            "Whether the model consistently over- or under-forecasts on average. "
+            "Over-forecasting → excess stock. Under-forecasting → stockouts.",
+            target="bias-label-tip", placement="bottom",
+        ),
+    ], xs=6, md=4)
+
+    return dbc.Row([cov_col, mae_col, bias_col], className="g-3")
 
 
-def _confidence_dist_chart(dark: bool = False) -> go.Figure:
-    dist         = ds.confidence_dist
-    if not dist:
+def _category_accuracy_chart(dark: bool = False) -> go.Figure:
+    df = ds.subgroup_eval_df
+    if df is None or df.empty:
         return go.Figure()
 
     layout_extra = _NEON_LAYOUT if dark else {"template": "plotly_white"}
-    labels       = ["high", "moderate", "low"]
-    counts       = [dist.get(l, 0) for l in labels]
-    total        = sum(counts) or 1
+    df_sorted    = df.sort_values("SMAPE", ascending=True).reset_index(drop=True)
 
-    if dark:
-        colors = ["#00FF87", "#FFB800", _NEON_RED]
-    else:
-        colors = ["#198754", "#ffc107", "#dc3545"]
+    def _colour(smape):
+        if smape < 50:
+            return "#00FF87" if dark else "#22c55e"
+        if smape < 70:
+            return "#FFB800" if dark else "#f59e0b"
+        return _NEON_RED if dark else "#ef4444"
 
+    def _verdict(smape):
+        return "Good" if smape < 50 else ("OK" if smape < 70 else "Poor")
+
+    colors = [_colour(s) for s in df_sorted["SMAPE"]]
+    hover  = [
+        f"<b>{row['group']}</b><br>"
+        f"Accuracy: {_verdict(row['SMAPE'])} (SMAPE {row['SMAPE']:.1f}%)<br>"
+        f"Avg error: {row['MAE']:.1f} units | Bias: {row['BIAS']:+.2f} units/week"
+        for _, row in df_sorted.iterrows()
+    ]
     text_color = _NEON_FONT if dark else "#333333"
 
     fig = go.Figure(go.Bar(
-        x=[l.upper() for l in labels],
-        y=counts,
+        x=df_sorted["SMAPE"],
+        y=df_sorted["group"],
+        orientation="h",
         marker_color=colors,
-        text=[f"{c:,}<br>({c/total*100:.1f}%)" for c in counts],
+        text=[f"{s:.1f}%" for s in df_sorted["SMAPE"]],
         textposition="outside",
-        textfont={"color": text_color, "size": 12},
-        hovertemplate="<b>%{x}</b><br>Count: %{y:,}<extra></extra>",
+        textfont={"color": text_color, "size": 11},
+        customdata=hover,
+        hovertemplate="%{customdata}<extra></extra>",
     ))
     fig.update_layout(
         **layout_extra,
-        title={"text": "Confidence Distribution (all test predictions)", "font": {"size": 13}},
-        margin={"t": 40, "b": 20, "l": 40, "r": 20},
-        yaxis_title="# Predictions",
+        title={"text": "Forecast Accuracy by Category (SMAPE %)", "font": {"size": 13}},
+        margin={"t": 40, "b": 20, "l": 20, "r": 60},
+        xaxis_title="SMAPE % (lower is better)",
+        yaxis_automargin=True,
         showlegend=False,
     )
     return fig
@@ -813,22 +944,27 @@ def _subgroup_eval_table(dark: bool = False) -> html.Div:
     if df is None or df.empty:
         return html.P("No subgroup data available.", className="text-muted")
 
+    display = df.copy()
+    display["reliability"] = display["SMAPE"].apply(
+        lambda s: "Good" if s < 50 else ("OK" if s < 70 else "Poor")
+    )
+
     columns = [
-        {"name": "Category", "id": "group"},
-        {"name": "N",        "id": "n",     "type": "numeric"},
-        {"name": "MAE",      "id": "MAE",   "type": "numeric", "format": {"specifier": ".3f"}},
-        {"name": "RMSE",     "id": "RMSE",  "type": "numeric", "format": {"specifier": ".3f"}},
-        {"name": "SMAPE %",  "id": "SMAPE", "type": "numeric", "format": {"specifier": ".2f"}},
-        {"name": "BIAS",     "id": "BIAS",  "type": "numeric", "format": {"specifier": ".3f"}},
+        {"name": "Category",    "id": "group"},
+        {"name": "Reliability", "id": "reliability"},
+        {"name": "MAE",         "id": "MAE",   "type": "numeric", "format": {"specifier": ".2f"}},
+        {"name": "SMAPE %",     "id": "SMAPE", "type": "numeric", "format": {"specifier": ".1f"}},
+        {"name": "BIAS",        "id": "BIAS",  "type": "numeric", "format": {"specifier": ".2f"}},
+        {"name": "N",           "id": "n",     "type": "numeric"},
     ]
 
     _SUBGROUP_TOOLTIPS = {
-        "group": "Product category group (first two segments of the SKU ID)",
-        "n":     "Number of test-set predictions in this category",
-        "MAE":   "Mean Absolute Error — average absolute difference between forecast and actual sales",
-        "RMSE":  "Root Mean Squared Error — penalises large errors more than MAE",
-        "SMAPE": "Symmetric Mean Absolute Percentage Error — scale-independent accuracy metric (lower is better)",
-        "BIAS":  "Average signed error (forecast − actual). Positive = over-forecasting, negative = under-forecasting",
+        "group":       "Product category (first two segments of the SKU ID)",
+        "reliability": "Overall verdict based on SMAPE: Good < 50%, OK 50–70%, Poor > 70%",
+        "MAE":         "Mean Absolute Error — average absolute difference between forecast and actual (in units)",
+        "SMAPE":       "Symmetric Mean Absolute Percentage Error — scale-independent accuracy (lower is better)",
+        "BIAS":        "Avg signed error (forecast − actual). Positive = over-forecasting, negative = under-forecasting",
+        "n":           "Number of test-set predictions in this category",
     }
 
     if dark:
@@ -853,17 +989,30 @@ def _subgroup_eval_table(dark: bool = False) -> html.Div:
         s_data = {}
         s_cell = {"fontSize": "13px", "padding": "14px 10px", "textAlign": "left"}
 
+    rel_cond = [
+        {"if": {"filter_query": '{reliability} = "Good"', "column_id": "reliability"},
+         "backgroundColor": ("rgba(0,255,135,0.12)" if dark else "#d1e7dd"),
+         "color": ("#00FF87" if dark else "#0a3622"), "fontWeight": "bold"},
+        {"if": {"filter_query": '{reliability} = "OK"', "column_id": "reliability"},
+         "backgroundColor": ("rgba(255,184,0,0.12)" if dark else "#fff3cd"),
+         "color": ("#FFB800" if dark else "#664d03"), "fontWeight": "bold"},
+        {"if": {"filter_query": '{reliability} = "Poor"', "column_id": "reliability"},
+         "backgroundColor": ("rgba(255,45,85,0.12)" if dark else "#f8d7da"),
+         "color": ("#FF2D55" if dark else "#842029"), "fontWeight": "bold"},
+    ]
+
     return dash_table.DataTable(
         columns=columns,
-        data=df.to_dict("records"),
+        data=display[["group", "reliability", "MAE", "SMAPE", "BIAS", "n"]].to_dict("records"),
         sort_action="native",
         tooltip_header={col["id"]: _SUBGROUP_TOOLTIPS.get(col["id"], "") for col in columns},
         tooltip_delay=0,
         tooltip_duration=None,
-        style_table={"overflowX": "auto", "minHeight": "300px"},
+        style_table={"overflowX": "auto"},
         style_header=s_header,
         style_data=s_data,
         style_cell=s_cell,
+        style_data_conditional=rel_cond,
     )
 
 
@@ -920,34 +1069,68 @@ def _reliability_nlg() -> html.Div:
     ])
 
 
+# ── lazy SHAP / audit computation ────────────────────────────────────────────
+
+def _ensure_global_shap() -> None:
+    """Compute and cache global SHAP for the current model type if not already available."""
+    if ds.global_shap_df is not None:
+        return
+    if ds.current_model_type == "neural_network":
+        print("[explanations] Global SHAP skipped — not supported for Neural Network.")
+        return
+    try:
+        from xai.global_shap import compute_global_shap, rank_feature_importance
+        from pathlib import Path
+        print(f"[explanations] Computing global SHAP for {ds.MODEL_TYPES[ds.current_model_type]} (50 samples)…")
+        shap_vals         = compute_global_shap(ds.model, ds.X_test, max_samples=50)
+        ds.global_shap_df = rank_feature_importance(shap_vals)
+        _path = ds._REPORTS / f"global_shap_{ds.MODEL_CONFIGS[ds.current_model_key]['suffix']}_{ds.current_model_type}.csv"
+        Path(_path).parent.mkdir(parents=True, exist_ok=True)
+        ds.global_shap_df.to_csv(_path, index=False)
+        print(f"[explanations] Global SHAP saved → {_path.name}")
+    except Exception as exc:
+        print(f"[explanations] SHAP computation failed: {exc}")
+
+
+def _ensure_feature_audit() -> None:
+    """Compute and cache feature audit if not already available."""
+    if ds.feature_audit_df is not None:
+        return
+    try:
+        from xai.global_shap import feature_quality_audit
+        from pathlib import Path
+        print("[explanations] Computing feature audit (first visit)…")
+        ds.feature_audit_df = feature_quality_audit(ds.X_test)
+        _path = ds._REPORTS / ds.MODEL_CONFIGS[ds.current_model_key]["audit_file"]
+        Path(_path).parent.mkdir(parents=True, exist_ok=True)
+        ds.feature_audit_df.to_csv(_path, index=False)
+        print("[explanations] Feature audit saved.")
+    except Exception as exc:
+        print(f"[explanations] Audit computation failed: {exc}")
+
+
 # ── callback registration ─────────────────────────────────────────────────────
 
 def register_explanations_callbacks(app) -> None:
 
-    @app.callback(
-        Output("explanations-subtitle", "children"),
-        Input("model-store", "data"),
-    )
-    def update_subtitle(model_key: str) -> str:
-        cfg = ds.MODEL_CONFIGS.get(model_key, {})
-        return cfg.get("label", "") + " · LGBM · M5 Walmart"
-
-    # ── Q8 — populate audit feature options + reset ───────────────────────────
+    # ── audit feature dropdown options + reset ────────────────────────────────
     @app.callback(
         Output("audit-feature-filter", "options"),
         Output("audit-feature-filter", "value"),
         Output("audit-flag-filter",    "value"),
         Input("model-store",           "data"),
+        Input("model-type-store",      "data"),
         Input("url",                   "pathname"),
         Input("audit-clear-filters",   "n_clicks"),
     )
-    def reset_audit_filters(_model_key: str, pathname: str, _clear):
+    def reset_audit_filters(_mk, _mt, pathname: str, _clear):
         df = ds.feature_audit_df
         if df is None or df.empty:
             return [], [], []
         opts = [{"label": _clean(f), "value": f} for f in sorted(df["feature"])]
         return opts, [], []
 
+    # ── Global SHAP + Feature Audit ───────────────────────────────────────────
     @app.callback(
         Output("global-shap-chart",   "figure"),
         Output("global-shap-nlg",     "children"),
@@ -955,17 +1138,20 @@ def register_explanations_callbacks(app) -> None:
         Output("feature-audit-table", "children"),
         Input("url",                  "pathname"),
         Input("model-store",          "data"),
+        Input("model-type-store",     "data"),
         Input("theme-store",          "data"),
         Input("audit-feature-filter", "value"),
         Input("audit-flag-filter",    "value"),
     )
-    def update_explanations(pathname: str, _model_key: str, theme: str,
+    def update_explanations(pathname: str, _mk, _mt, theme: str,
                             audit_features: list, audit_flags: list):
         if pathname != "/explanations":
             return {}, [], [], []
         dark = theme == "dark"
 
-        # apply audit column filters
+        _ensure_global_shap()
+        _ensure_feature_audit()
+
         df = ds.feature_audit_df
         if df is not None and not df.empty:
             if audit_features: df = df[df["feature"].isin(audit_features)]
@@ -973,153 +1159,29 @@ def register_explanations_callbacks(app) -> None:
 
         return (
             _global_shap_figure(dark=dark),
-            _global_shap_nlg(),
+            _combined_nlg(),
             _audit_summary_cards(dark=dark),
             _audit_table(dark=dark, df=df),
         )
 
-    # ── Q5 — populate SKU A options ───────────────────────────────────────────
-    @app.callback(
-        Output("comp-sku-a", "options"),
-        Output("comp-sku-a", "value"),
-        Input("model-store", "data"),
-        Input("url",         "pathname"),
-    )
-    def update_comp_sku_a(model_key: str, pathname: str):
-        if pathname != "/explanations":
-            return [], None
-        _comparative_cache.clear()
-        opts    = [{"label": s, "value": s} for s in ds.SKU_LIST]
-        default = ds.SKU_LIST[0] if ds.SKU_LIST else None
-        return opts, default
-
-    # ── Q5 — auto-suggest SKU B based on similarity ───────────────────────────
-    @app.callback(
-        Output("comp-sku-b", "options"),
-        Output("comp-sku-b", "value"),
-        Input("comp-sku-a",  "value"),
-        Input("model-store", "data"),
-    )
-    def update_comp_sku_b(sku_a: str, _model_key: str):
-        if not sku_a:
-            return [], None
-        similar = _get_similar_skus(sku_a, n=10)
-        opts    = [{"label": s, "value": s} for s in similar]
-        default = similar[0] if similar else None
-        return opts, default
-
-    # ── Q5 — render comparison charts + NLG ──────────────────────────────────
-    @app.callback(
-        Output("comp-diff-chart", "figure"),
-        Output("comp-side-chart", "figure"),
-        Output("comp-nlg",        "children"),
-        Input("comp-sku-a",   "value"),
-        Input("comp-sku-b",   "value"),
-        Input("theme-store",  "data"),
-        Input("url",          "pathname"),
-    )
-    def update_comp_charts(sku_a: str, sku_b: str, theme: str, pathname: str):
-        if pathname != "/explanations" or not sku_a or not sku_b or sku_a == sku_b:
-            return {}, {}, []
-        dark = theme == "dark"
-        return (
-            _comp_diff_figure(sku_a, sku_b, dark=dark),
-            _comp_side_figure(sku_a, sku_b, dark=dark),
-            _comp_nlg(sku_a, sku_b),
-        )
-
-    # ── Q7 — stockout column filter options + reset ───────────────────────────
-    @app.callback(
-        Output("stockout-sku-col-filter",  "options"),
-        Output("stockout-sku-col-filter",  "value"),
-        Output("stockout-risk-col-filter", "value"),
-        Input("model-store",               "data"),
-        Input("url",                       "pathname"),
-        Input("stockout-col-clear-filters","n_clicks"),
-    )
-    def reset_stockout_col_filters(_model_key: str, _pathname: str, _clear):
-        df = ds.stockout_risk_df
-        if df is None or df.empty:
-            return [], [], []
-        opts = [{"label": r, "value": r} for r in sorted(df["item_id"])]
-        return opts, [], []
-
-    # ── Q7 — global risk table + SKU selector ────────────────────────────────
-    @app.callback(
-        Output("stockout-global-table",   "children"),
-        Output("stockout-sku-selector",   "options"),
-        Output("stockout-sku-selector",   "value"),
-        Input("url",                      "pathname"),
-        Input("model-store",              "data"),
-        Input("theme-store",              "data"),
-        Input("stockout-sku-col-filter",  "value"),
-        Input("stockout-risk-col-filter", "value"),
-    )
-    def update_stockout_global(pathname: str, _model_key: str, theme: str,
-                               col_skus: list, col_risks: list):
-        if pathname != "/explanations":
-            return [], [], None
-        _stockout_shap_cache.clear()
-        _stockout_censored_cache.clear()
-        dark = theme == "dark"
-
-        df = ds.stockout_risk_df
-        if df is None or df.empty:
-            return _stockout_global_table(dark=dark, df=df), [], None
-
-        # apply column filters to the display table
-        filtered = df.copy()
-        filtered["risk_level"] = filtered["stockout_rate"].apply(
-            lambda r: "HIGH" if r > 0.5 else "MODERATE" if r > 0.2 else "LOW"
-        )
-        if col_skus:  filtered = filtered[filtered["item_id"].isin(col_skus)]
-        if col_risks: filtered = filtered[filtered["risk_level"].isin(col_risks)]
-
-        table   = _stockout_global_table(dark=dark, df=filtered)
-        at_risk = df[df["stockout_rate"] > 0.2].sort_values("stockout_rate", ascending=False)
-        opts    = [{"label": f"{r['item_id']} ({r['stockout_rate']*100:.0f}%)", "value": r["item_id"]}
-                   for _, r in at_risk.iterrows()]
-        default = opts[0]["value"] if opts else None
-        return table, opts, default
-
-    # ── Q7 — per-SKU detail charts + NLG ─────────────────────────────────────
-    @app.callback(
-        Output("stockout-pred-chart",     "figure"),
-        Output("stockout-shap-chart",     "figure"),
-        Output("stockout-censored-chart", "figure"),
-        Output("stockout-nlg",            "children"),
-        Input("stockout-sku-selector", "value"),
-        Input("theme-store",           "data"),
-        Input("url",                   "pathname"),
-    )
-    def update_stockout_detail(sku_id: str, theme: str, pathname: str):
-        if pathname != "/explanations" or not sku_id:
-            return {}, {}, {}, []
-        dark = theme == "dark"
-        return (
-            _stockout_pred_figure(sku_id, dark=dark),
-            _stockout_shap_figure(sku_id, dark=dark),
-            _stockout_censored_figure(sku_id, dark=dark),
-            _stockout_nlg(sku_id),
-        )
-
-    # ── Q9 — Model Reliability & Cold-Start ──────────────────────────────────
+    # ── Model Reliability & Cold-Start ────────────────────────────────────────
     @app.callback(
         Output("reliability-stat-cards", "children"),
         Output("confidence-dist-chart",  "figure"),
         Output("subgroup-eval-table",    "children"),
         Output("reliability-nlg",        "children"),
-        Input("url",         "pathname"),
-        Input("model-store", "data"),
-        Input("theme-store", "data"),
+        Input("url",              "pathname"),
+        Input("model-store",      "data"),
+        Input("model-type-store", "data"),
+        Input("theme-store",      "data"),
     )
-    def update_reliability(pathname: str, _model_key: str, theme: str):
+    def update_reliability(pathname: str, _mk, _mt, theme: str):
         if pathname != "/explanations":
             return [], {}, [], []
         dark = theme == "dark"
         return (
             _reliability_stat_cards(dark=dark),
-            _confidence_dist_chart(dark=dark),
+            _category_accuracy_chart(dark=dark),
             _subgroup_eval_table(dark=dark),
             _reliability_nlg(),
         )

@@ -15,21 +15,27 @@ def safety_stock_quantile(
     q50: float,
     q90: float,
     lead_time_days: int = 7,
+    forecast_horizon: int = 7,
 ) -> float:
     """Compute safety stock from quantile forecast spread.
 
-    Safety stock = q90 − q50, scaled by √(lead_time / forecast_horizon).
-    The scaling assumes the forecast already covers a 7-day horizon; for
-    longer lead times the uncertainty grows as √lead_time.
+    Safety stock = (q90 − q50) × √(lead_time / forecast_horizon).
+
+    Dividing by √forecast_horizon normalises the spread back to a per-day
+    uncertainty, then multiplying by √lead_time scales it to the lead-time
+    window. This keeps safety stock consistent across different forecast
+    windows (7/14/28-day) since forecast errors scale with √horizon.
 
     Parameters
     ----------
     q50 : float
-        Median forecast for the lead-time period.
+        Median forecast for the window period.
     q90 : float
-        90th percentile forecast.
+        90th-percentile forecast for the window period.
     lead_time_days : int
-        Replenishment lead time in days.
+        Replenishment lead time in days (default 7).
+    forecast_horizon : int
+        Number of days in the forecast window (7, 14, or 28).
 
     Returns
     -------
@@ -37,7 +43,7 @@ def safety_stock_quantile(
         Safety stock units (≥ 0).
     """
     spread = max(0.0, q90 - q50)
-    scale  = np.sqrt(lead_time_days / 7.0)
+    scale  = np.sqrt(lead_time_days / float(forecast_horizon))
     return float(math.ceil(spread * scale))
 
 

@@ -140,7 +140,7 @@ def layout() -> html.Div:
                         dbc.Row([
                             dbc.Col([
                                 dbc.Label(
-                                    "Unit Margin ($/unit)",
+                                    "Gross Margin %",
                                     id="report-margin-tip",
                                     className="small fw-bold mb-0",
                                     style={
@@ -151,22 +151,23 @@ def layout() -> html.Div:
                                     },
                                 ),
                                 dbc.Tooltip(
-                                    "Profit margin lost per unit in a stockout — used for cost impact.",
+                                    "Profit margin as % of sell price lost per unit on a stockout. "
+                                    "Converted to $ per SKU using its actual sell price.",
                                     target="report-margin-tip", placement="top",
                                 ),
                                 dbc.InputGroup([
-                                    dbc.InputGroupText("$", style={"fontSize": "13px"}),
                                     dbc.Input(
                                         id="report-unit-margin",
-                                        type="number", value=3.50,
-                                        min=0.01, step="any",
+                                        type="number", value=25,
+                                        min=1, max=80, step=1,
                                         style={"fontSize": "13px"},
                                     ),
+                                    dbc.InputGroupText("%", style={"fontSize": "13px"}),
                                 ], size="sm", className="mt-1"),
                             ], md=6),
                             dbc.Col([
                                 dbc.Label(
-                                    "Holding Cost ($/unit)",
+                                    "Holding Cost %",
                                     id="report-holding-tip",
                                     className="small fw-bold mb-0",
                                     style={
@@ -177,17 +178,18 @@ def layout() -> html.Div:
                                     },
                                 ),
                                 dbc.Tooltip(
-                                    "Cost to hold one unsold unit for the forecast period.",
+                                    "Cost to hold one unsold unit as % of sell price (storage, spoilage). "
+                                    "Converted to $ per SKU using its actual sell price.",
                                     target="report-holding-tip", placement="top",
                                 ),
                                 dbc.InputGroup([
-                                    dbc.InputGroupText("$", style={"fontSize": "13px"}),
                                     dbc.Input(
                                         id="report-holding-cost",
-                                        type="number", value=0.80,
-                                        min=0.01, step="any",
+                                        type="number", value=8,
+                                        min=1, max=50, step=1,
                                         style={"fontSize": "13px"},
                                     ),
+                                    dbc.InputGroupText("%", style={"fontSize": "13px"}),
                                 ], size="sm", className="mt-1"),
                             ], md=6),
                         ], className="g-2"),

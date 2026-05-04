@@ -7,25 +7,15 @@ from __future__ import annotations
 import math
 import numpy as np
 import pandas as pd
-from dash import Input, Output, State, ctx, html
+from dash import Input, Output, State, ctx, html, dcc
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 
 import app.data_store as ds
-from xai.counterfactual import batch_counterfactuals
 from xai.cost_impact import simulate_cost_distribution, optimal_order_quantity
 
 
 def register_whatif_callbacks(app) -> None:
-
-    # ── subtitle ───────────────────────────────────────────────────────────────
-    @app.callback(
-        Output("whatif-subtitle", "children"),
-        Input("model-store", "data"),
-    )
-    def whatif_subtitle(model_key: str) -> str:
-        cfg = ds.MODEL_CONFIGS.get(model_key, {})
-        return cfg.get("label", "") + " · LGBM · M5 Walmart"
 
     # ── populate SKU dropdown ──────────────────────────────────────────────────
     @app.callback(
@@ -40,157 +30,134 @@ def register_whatif_callbacks(app) -> None:
 
     # ── initialise / reset Q4 controls when SKU changes ───────────────────────
     @app.callback(
-        Output("whatif-price",    "value"),
-        Output("whatif-discount", "value"),
-        Output("whatif-snap",     "value"),
-        Input("whatif-sku",             "value"),
-        Input("whatif-reset-controls",  "n_clicks"),
-        Input("model-store",            "data"),
+        Output("whatif-price",        "value"),
+        Output("whatif-snap",         "value"),
+        Output("whatif-custom-order", "value"),
+        Input("whatif-sku",            "value"),
+        Input("whatif-reset-controls", "n_clicks"),
+        Input("model-store",           "data"),
     )
     def init_whatif_controls(sku_id, _reset, _model_key):
         if not sku_id:
-            return None, 0.0, 0
+            return None, False, None
         try:
-            X_row    = ds.get_sku_X_row(sku_id)
-            price    = round(float(X_row["aggregated_sell_price"].iloc[0]), 4)
-            discount = round(float(X_row["discount_depth"].iloc[0]),        2)
-            snap     = bool(int(X_row["snap_relevant"].iloc[0]))
-            return price, discount, snap
+            X_row = ds.get_sku_X_row(sku_id)
+            price = round(float(X_row["aggregated_sell_price"].iloc[0]), 2)
+            snap  = bool(int(X_row["snap_ca"].iloc[0]))
+            return price, snap, None
         except Exception:
-            return None, 0.0, False
+            return None, False, None
 
-    # ── Q4 — impact cards + sweep charts + NLG ────────────────────────────────
+    # ── Lock / clear Scenario A ───────────────────────────────────────────────
     @app.callback(
-        Output("whatif-impact-cards",   "children"),
-        Output("whatif-sweep-price",    "figure"),
-        Output("whatif-sweep-discount", "figure"),
-        Output("whatif-sweep-snap",     "figure"),
-        Output("whatif-q4-nlg",         "children"),
-        Input("whatif-run-q4",          "n_clicks"),
-        Input("whatif-reset-controls",  "n_clicks"),
-        Input("whatif-sku",             "value"),
-        Input("theme-store",            "data"),
-        Input("model-store",            "data"),
-        State("whatif-price",           "value"),
-        State("whatif-discount",        "value"),
-        State("whatif-snap",            "value"),
+        Output("whatif-scenario-a-store", "data"),
+        Input("whatif-lock-a",            "n_clicks"),
+        Input("whatif-clear-a",           "n_clicks"),
+        Input("whatif-sku",               "value"),
+        Input("whatif-reset-controls",    "n_clicks"),
+        State("whatif-current-store",     "data"),
+        prevent_initial_call=True,
     )
-    def update_whatif_q4(_run_q4, _reset, sku_id, theme, _model_key, price, discount, snap):
+    def lock_scenario_a(_lock, _clear, _sku, _reset, current):
+        if ctx.triggered_id in ("whatif-clear-a", "whatif-sku", "whatif-reset-controls"):
+            return None
+        if ctx.triggered_id == "whatif-lock-a" and current:
+            return current
+        return None
+
+    # ── Scenario comparison ────────────────────────────────────────────────────
+    @app.callback(
+        Output("whatif-scenario-comparison", "children"),
+        Input("whatif-scenario-a-store",     "data"),
+        Input("whatif-current-store",        "data"),
+        Input("theme-store",                 "data"),
+    )
+    def render_comparison(scenario_a, current, theme):
+        if not scenario_a or not current:
+            return []
+        dark = theme == "dark"
+        return _scenario_comparison(scenario_a, current, dark)
+
+    # ── Combined scenario + cost impact ───────────────────────────────────────
+    @app.callback(
+        Output("whatif-causal-warning",   "children"),
+        Output("whatif-impact-cards",     "children"),
+        Output("whatif-compare-chart",    "figure"),
+        Output("whatif-cost-cards",       "children"),
+        Output("whatif-order-comparison", "children"),
+        Output("whatif-cost-chart",       "figure"),
+        Output("whatif-risk-chart",       "figure"),
+        Output("whatif-q4-nlg",           "children"),
+        Output("whatif-q10-nlg",          "children"),
+        Output("whatif-current-store",    "data"),
+        Input("whatif-run-q4",         "n_clicks"),
+        Input("whatif-reset-controls", "n_clicks"),
+        Input("whatif-sku",            "value"),
+        Input("theme-store",           "data"),
+        Input("model-store",           "data"),
+        State("whatif-price",          "value"),
+        State("whatif-snap",           "value"),
+        State("whatif-unit-margin",    "value"),
+        State("whatif-holding-cost",   "value"),
+        State("whatif-custom-order",   "value"),
+    )
+    def update_whatif(
+        _run, _reset, sku_id, theme, _model_key,
+        price, snap, margin_pct, holding_pct, custom_order,
+    ):
         dark      = (theme == "dark")
         empty_fig = _empty_figure(dark)
+        empty     = ([], [], empty_fig, [], [], empty_fig, empty_fig, [], [], None)
 
         if not sku_id or not ds.is_loaded():
-            return [], empty_fig, empty_fig, empty_fig, []
+            return empty
 
         try:
             X_row = ds.get_sku_X_row(sku_id)
         except KeyError:
-            return [], empty_fig, empty_fig, empty_fig, []
+            return empty
 
-        orig_price    = float(X_row["aggregated_sell_price"].iloc[0])
-        orig_discount = float(X_row["discount_depth"].iloc[0])
-        orig_snap     = int(X_row["snap_relevant"].iloc[0])
+
+        orig_price = float(X_row["aggregated_sell_price"].iloc[0])
+        orig_snap  = int(X_row["snap_ca"].iloc[0])
 
         triggered = ctx.triggered_id or "whatif-sku"
-
         if triggered in ("whatif-sku", "model-store", "whatif-reset-controls"):
             cur_price    = orig_price
-            cur_discount = orig_discount
             cur_snap     = orig_snap
+            margin_pct   = 25.0
+            holding_pct  = 8.0
+            custom_order = None
         else:
-            cur_price    = float(price)    if price    is not None else orig_price
-            cur_discount = float(discount) if discount is not None else orig_discount
-            cur_snap     = int(snap)       if snap     is not None else orig_snap
+            cur_price   = float(price)       if price       is not None else orig_price
+            cur_snap    = int(snap)          if snap        is not None else orig_snap
+            margin_pct  = float(margin_pct  or 25)
+            holding_pct = float(holding_pct or 8)
 
-        # Combined modified row
+        # ── Forecast simulation ───────────────────────────────────────────────
+        original_pred = float(ds.forecasts.get(sku_id, {}).get("q50", 0.0))
+
         X_mod = X_row.copy()
         X_mod["aggregated_sell_price"] = cur_price
-        X_mod["discount_depth"]        = cur_discount
-        X_mod["snap_relevant"]         = cur_snap
+        X_mod["snap_ca"]               = cur_snap
+        new_pred_raw = max(0.0, float(ds.model.predict(X_mod)[0]))
 
-        original_pred = float(ds.model.predict(X_row)[0])
-        new_pred      = float(ds.model.predict(X_mod)[0])
-        delta         = new_pred - original_pred
+        # Ceil for consistency with all other forecast displays
+        new_pred = float(math.ceil(new_pred_raw))
+        delta    = new_pred - original_pred
 
-        # Compute all three sweeps
-        price_batch    = batch_counterfactuals(
-            ds.model, X_row, "aggregated_sell_price",
-            np.linspace(orig_price * 0.5, orig_price * 1.5, 30),
-        )
-        discount_batch = batch_counterfactuals(
-            ds.model, X_row, "discount_depth",
-            np.linspace(0.0, 0.50, 30),
-        )
-        snap_batch     = batch_counterfactuals(
-            ds.model, X_row, "snap_relevant", [0, 1],
-        )
+        # ── Build scenario q10/q90 from ceiled q50 ───────────────────────────
+        std_v  = float(ds.sku_std.get(sku_id, ds.sku_std.mean())) if ds.sku_std is not None else 1.0
+        iv_margin = 1.282 * std_v
+        q50 = new_pred
+        q10 = max(0.0, q50 - iv_margin)
+        q90 = q50 + iv_margin
 
-        price_fig    = _price_figure(price_batch,    cur_price,    original_pred, sku_id, dark)
-        discount_fig = _discount_figure(discount_batch, cur_discount, original_pred, sku_id, dark)
-        snap_fig     = _snap_figure(snap_batch,      cur_snap,     original_pred, sku_id, dark)
-
-        impact_cards = _impact_cards(original_pred, new_pred, delta)
-        nlg_div      = _q4_nlg(
-            sku_id,
-            orig_price, cur_price,
-            orig_discount, cur_discount,
-            orig_snap, cur_snap,
-            original_pred, new_pred, delta,
-        )
-
-        return impact_cards, price_fig, discount_fig, snap_fig, nlg_div
-
-    # ── Q10 — reset cost inputs to defaults ────────────────────────────────────
-    @app.callback(
-        Output("whatif-unit-margin",  "value"),
-        Output("whatif-holding-cost", "value"),
-        Input("whatif-reset-costs",   "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def reset_cost_inputs(_n):
-        return ds.UNIT_MARGIN, ds.HOLDING_COST
-
-    # ── Q10 — cost cards + cost curve + NLG ───────────────────────────────────
-    @app.callback(
-        Output("whatif-cost-cards", "children"),
-        Output("whatif-cost-chart", "figure"),
-        Output("whatif-q10-nlg",    "children"),
-        Input("whatif-run-costs",    "n_clicks"),
-        Input("whatif-reset-costs",  "n_clicks"),
-        Input("whatif-sku",          "value"),
-        Input("theme-store",         "data"),
-        Input("model-store",         "data"),
-        State("whatif-unit-margin",  "value"),
-        State("whatif-holding-cost", "value"),
-    )
-    def update_whatif_q10(_run, _reset, sku_id, theme, _model_key, unit_margin, holding_cost):
-        dark      = (theme == "dark")
-        empty_fig = _empty_figure(dark)
-
-        if not sku_id or not ds.is_loaded():
-            return [], empty_fig, []
-
-        if ctx.triggered_id == "whatif-reset-costs":
-            unit_margin  = ds.UNIT_MARGIN
-            holding_cost = ds.HOLDING_COST
-        else:
-            try:
-                unit_margin  = float(unit_margin)
-                holding_cost = float(holding_cost)
-            except (TypeError, ValueError):
-                return [], empty_fig, []
-
-            if unit_margin <= 0 or holding_cost <= 0:
-                return [], empty_fig, []
-
-        iv = ds.forecasts.get(sku_id)
-        if iv is None:
-            return [], empty_fig, []
-
-        q10, q50, q90 = iv["q10"], iv["q50"], iv["q90"]
+        # ── Cost impact ───────────────────────────────────────────────────────
+        unit_margin  = orig_price * margin_pct  / 100.0
+        holding_cost = orig_price * holding_pct / 100.0
 
         opt = optimal_order_quantity(q10, q50, q90, unit_margin, holding_cost)
-
         sim = simulate_cost_distribution(
             q10, q50, q90, opt["optimal_qty"],
             unit_margin, holding_cost,
@@ -198,10 +165,10 @@ def register_whatif_callbacks(app) -> None:
         )
         exp_so   = float(sim["stockout_cost"].mean())
         exp_os   = float(sim["overstock_cost"].mean())
-        exp_tot  = exp_so + exp_os
         dominant = "STOCKOUT" if exp_so > exp_os else "OVERSTOCK"
+        p90_cost = float(np.percentile(sim["total_cost"], 90))
+        p95_cost = float(np.percentile(sim["total_cost"], 95))
 
-        # Cost curve: sweep order quantities
         order_range = np.linspace(max(q10 * 0.5, 0.1), q90 * 1.5, 35)
         rows = []
         for oq in order_range:
@@ -217,11 +184,58 @@ def register_whatif_callbacks(app) -> None:
             })
         curve = pd.DataFrame(rows)
 
-        fig       = _cost_curve_figure(curve, opt, q50, sku_id, dark)
-        cost_cds  = _cost_stat_cards(opt, exp_so, exp_os, exp_tot, dominant)
-        nlg_div   = _q10_nlg(sku_id, q50, opt, exp_so, exp_os, unit_margin, holding_cost, dominant)
+        # ── Custom order qty comparison ───────────────────────────────────────
+        custom_qty = float(custom_order) if custom_order is not None else None
+        order_comparison = _order_comparison(
+            custom_qty, opt, q10, q50, q90,
+            unit_margin, holding_cost,
+        )
 
-        return cost_cds, fig, nlg_div
+        # ── Counterintuitive detection ────────────────────────────────────────
+        caution = _causal_warning(orig_price, cur_price, orig_snap, cur_snap,
+                                  original_pred, new_pred)
+
+        # Describe changes for chart hovers
+        changes = []
+        if abs(cur_price - orig_price) > 0.001:
+            changes.append(f"price {'↑' if cur_price > orig_price else '↓'} "
+                           f"${orig_price:.2f}→${cur_price:.2f}")
+        if cur_snap != orig_snap:
+            changes.append(f"SNAP {'on→off' if orig_snap and not cur_snap else 'off→on'}")
+        changes_txt = ", ".join(changes) if changes else "no changes"
+
+        current = {
+            "sku_id":    sku_id,
+            "price":     cur_price,
+            "snap":      cur_snap,
+            "margin_pct":   margin_pct,
+            "holding_pct":  holding_pct,
+            "forecast":     int(new_pred),
+            "orig_forecast": int(original_pred),
+            "optimal_order": math.ceil(opt["optimal_qty"]),
+            "exp_cost":   round(exp_so + exp_os, 2),
+            "exp_so":     round(exp_so, 2),
+            "exp_os":     round(exp_os, 2),
+            "p90":        round(p90_cost, 2),
+            "p95":        round(p95_cost, 2),
+            "dominant":   dominant,
+        }
+
+        return (
+            caution,
+            _impact_cards(original_pred, new_pred, delta),
+            _compare_figure(original_pred, new_pred, sku_id, changes_txt, dark),
+            _cost_stat_cards(opt, exp_so, exp_os, exp_so + exp_os, dominant),
+            order_comparison,
+            _cost_curve_figure(curve, opt, q50, custom_qty, sku_id, dark),
+            _risk_distribution_figure(sim, sku_id, dark),
+            _q4_nlg(sku_id, orig_price, cur_price, orig_snap, cur_snap,
+                    original_pred, new_pred, delta),
+            _q10_nlg(sku_id, q50, orig_price, margin_pct, holding_pct,
+                     opt, exp_so, exp_os, unit_margin, holding_cost, dominant,
+                     p90_cost, p95_cost),
+            current,
+        )
 
 
 # ── figure helpers ────────────────────────────────────────────────────────────
@@ -259,93 +273,228 @@ def _base_layout(c: dict, title: str) -> dict:
     )
 
 
-def _price_figure(
-    batch_df: pd.DataFrame, cur_price: float, baseline: float,
-    sku_id: str, dark: bool,
-) -> go.Figure:
-    c   = _theme(dark)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=batch_df["feature_value"], y=batch_df["prediction"],
-        mode="lines", line=dict(color=c["accent"], width=2.5),
-    ))
-    fig.add_vline(
-        x=cur_price, line_dash="dash", line_color="gray",
-        annotation_text=f"Current ${cur_price:.2f}",
-        annotation_position="top right",
-        annotation_font_color=c["text"],
-    )
-    fig.add_hline(y=baseline, line_dash="dot", line_color="rgba(128,128,128,0.45)")
-    fig.update_layout(
-        **_base_layout(c, f"Price Sensitivity — {sku_id}"),
-        xaxis=dict(title="Price ($)",           gridcolor=c["grid"], zerolinecolor=c["grid"]),
-        yaxis=dict(title="7-day Forecast (units)", gridcolor=c["grid"], zerolinecolor=c["grid"]),
-    )
-    return fig
+def _scenario_comparison(a: dict, b: dict, dark: bool) -> list:
+    """Render a side-by-side comparison table + bar chart for two scenarios."""
+    c = _theme(dark)
 
+    def _snap_label(v): return "On" if v else "Off"
+    def _delta(a_val, b_val, fmt=".1f"):
+        d = b_val - a_val
+        return f"{'+' if d >= 0 else ''}{d:{fmt}}"
 
-def _discount_figure(
-    batch_df: pd.DataFrame, cur_discount: float, baseline: float,
-    sku_id: str, dark: bool,
-) -> go.Figure:
-    c   = _theme(dark)
-    fig = go.Figure()
-    xs  = batch_df["feature_value"] * 100
-    fig.add_trace(go.Scatter(
-        x=xs, y=batch_df["prediction"],
-        mode="lines", line=dict(color=c["accent"], width=2.5),
-    ))
-    fig.add_vline(
-        x=cur_discount * 100, line_dash="dash", line_color="gray",
-        annotation_text=f"Current {cur_discount * 100:.0f}%",
-        annotation_position="top right",
-        annotation_font_color=c["text"],
-    )
-    fig.add_hline(y=baseline, line_dash="dot", line_color="rgba(128,128,128,0.45)")
-    fig.update_layout(
-        **_base_layout(c, f"Discount Sensitivity — {sku_id}"),
-        xaxis=dict(title="Discount Depth (%)",      gridcolor=c["grid"], zerolinecolor=c["grid"]),
-        yaxis=dict(title="7-day Forecast (units)",  gridcolor=c["grid"], zerolinecolor=c["grid"]),
-    )
-    return fig
-
-
-def _snap_figure(
-    batch_df: pd.DataFrame, cur_snap: int, baseline: float,
-    sku_id: str, dark: bool,
-) -> go.Figure:
-    c          = _theme(dark)
-    bar_colors = [
-        c["accent"] if int(v) == int(cur_snap) else "rgba(108,117,125,0.35)"
-        for v in [0, 1]
+    # ── comparison table ─────────────────────────────────────────────────────
+    rows = [
+        ("Price ($)",          f"${a['price']:.2f}",          f"${b['price']:.2f}"),
+        ("SNAP CA",            _snap_label(a["snap"]),         _snap_label(b["snap"])),
+        ("Margin %",           f"{a['margin_pct']:.0f}%",      f"{b['margin_pct']:.0f}%"),
+        ("Holding %",          f"{a['holding_pct']:.0f}%",     f"{b['holding_pct']:.0f}%"),
+        ("Scenario Forecast",  f"{a['forecast']} units",       f"{b['forecast']} units"),
+        ("Optimal Order",      f"{a['optimal_order']} units",  f"{b['optimal_order']} units"),
+        ("Expected Cost",      f"${a['exp_cost']:.2f}",        f"${b['exp_cost']:.2f}"),
+        ("Risk P90",           f"${a['p90']:.2f}",             f"${b['p90']:.2f}"),
+        ("Risk P95",           f"${a['p95']:.2f}",             f"${b['p95']:.2f}"),
+        ("Dominant Risk",      a["dominant"],                   b["dominant"]),
     ]
+
+    th_style = {"backgroundColor": "#343a40" if not dark else "#0A0C1A",
+                "color": "#fff", "fontWeight": "bold",
+                "fontSize": "13px", "padding": "8px 12px"}
+    td_style = {"fontSize": "13px", "padding": "7px 12px"}
+    td_b_style = {**td_style, "color": "#6d28d9" if not dark else "#5F01FB",
+                  "fontWeight": "600"}
+
+    table_rows = []
+    for label, val_a, val_b in rows:
+        table_rows.append(html.Tr([
+            html.Td(label, style={**td_style, "color": "#6c757d", "fontWeight": "500"}),
+            html.Td(val_a, style=td_style),
+            html.Td(val_b, style=td_b_style),
+        ]))
+
+    table = html.Table([
+        html.Thead(html.Tr([
+            html.Th("", style=th_style),
+            html.Th("Scenario A (locked)", style=th_style),
+            html.Th("Scenario B (current)", style=th_style),
+        ])),
+        html.Tbody(table_rows),
+    ], className="table table-sm table-bordered mb-0")
+
+    # ── bar chart ─────────────────────────────────────────────────────────────
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=["SNAP Off (0)", "SNAP On (1)"],
-        y=batch_df["prediction"].tolist(),
-        marker_color=bar_colors,
-        text=[f"{v:.2f}" for v in batch_df["prediction"]],
-        textposition="outside",
-        textfont=dict(color=c["text"]),
-    ))
-    fig.add_hline(
-        y=baseline, line_dash="dot", line_color="gray",
-        annotation_text=f"Baseline {baseline:.1f}",
-        annotation_position="top right",
-        annotation_font_color=c["text"],
-    )
+    color_a  = "#6d28d9" if not dark else "#5F01FB"
+    color_b  = "#f97316"
+
+    for label, key, suffix in [
+        ("Forecast (units)", "forecast", " units"),
+        ("Optimal Order (units)", "optimal_order", " units"),
+        ("Expected Cost ($)", "exp_cost", ""),
+        ("P95 Risk ($)", "p95", ""),
+    ]:
+        fig.add_trace(go.Bar(
+            name=label,
+            x=["Scenario A", "Scenario B"],
+            y=[a[key], b[key]],
+            marker_color=[color_a, color_b],
+            text=[f"{a[key]}{suffix}", f"{b[key]}{suffix}"],
+            textposition="outside",
+            textfont=dict(size=11, color=c["text"]),
+            hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y}}<extra></extra>",
+            visible=False,
+        ))
+
+    fig.data[0].visible = True  # default: show Forecast
+
     fig.update_layout(
-        **_base_layout(c, f"SNAP Effect — {sku_id}"),
-        xaxis=dict(title="SNAP Status",             gridcolor=c["grid"], zerolinecolor=c["grid"]),
-        yaxis=dict(title="7-day Forecast (units)",  gridcolor=c["grid"], zerolinecolor=c["grid"]),
+        paper_bgcolor=c["bg"], plot_bgcolor=c["bg"],
+        font=dict(color=c["text"], size=12),
+        margin=dict(l=40, r=20, t=50, b=50),
+        showlegend=False,
+        yaxis=dict(gridcolor=c["grid"]),
+        xaxis=dict(gridcolor=c["grid"]),
+        updatemenus=[dict(
+            type="buttons", direction="right",
+            x=0.0, y=1.18, xanchor="left",
+            buttons=[
+                dict(label=lbl,
+                     method="update",
+                     args=[{"visible": [i == j for j in range(4)]}])
+                for i, lbl in enumerate(["Forecast", "Optimal Order",
+                                         "Expected Cost", "P95 Risk"])
+            ],
+            bgcolor="#f8f9fa" if not dark else "#1a1a2e",
+            font=dict(color=c["text"], size=11),
+        )],
+    )
+
+    return [
+        html.H6("Scenario Comparison", className="fw-bold mb-3"),
+        dbc.Row([
+            dbc.Col(table, md=6),
+            dbc.Col(
+                dcc.Graph(figure=fig, config={"displayModeBar": False},
+                          style={"height": "280px"}),
+                md=6,
+            ),
+        ]),
+    ]
+
+
+def _causal_warning(
+    orig_price: float, cur_price: float,
+    orig_snap: int,   cur_snap: int,
+    original_pred: float, new_pred: float,
+) -> list:
+    """Return a warning alert if the forecast moves counterintuitively."""
+    price_changed = abs(cur_price - orig_price) > 0.001
+    if not price_changed:
+        return []
+
+    price_up    = cur_price > orig_price
+    forecast_up = new_pred  > original_pred
+
+    if price_up != forecast_up:   # intuitive — price up, demand down (or vice versa)
+        return []
+
+    direction = "increased" if price_up else "decreased"
+    return [dbc.Alert([
+        html.Strong("⚠ Counterintuitive result. "),
+        html.Span(
+            f"Price {direction} but the forecast also {direction}. "
+            "This reflects a historical correlation the model learned from training data — "
+            "not a causal effect. In the M5 dataset, price changes often coincided with "
+            "high-demand periods (e.g. holidays), so the model associates higher prices "
+            "with higher sales. Treat price-driven what-if results with caution.",
+        ),
+    ], color="warning", className="mb-3", style={"fontSize": "13px"})]
+
+
+def _compare_figure(
+    original_pred: float, new_pred: float,
+    sku_id: str, changes_txt: str, dark: bool,
+) -> go.Figure:
+    c         = _theme(dark)
+    orig_ceil = math.ceil(original_pred)
+    new_ceil  = math.ceil(new_pred)
+    delta     = new_ceil - orig_ceil
+    new_color = "#22c55e" if delta >= 0 else "#ef4444"
+
+    hover = [
+        f"<b>Current Forecast</b><br>{orig_ceil} units<br>Source: future predictions CSV",
+        f"<b>Scenario Forecast</b><br>{new_ceil} units<br>"
+        f"Changes: {changes_txt}<br>"
+        f"Δ {'+' if delta >= 0 else ''}{delta} units vs current",
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=["Current Forecast", "Scenario Forecast"],
+        y=[orig_ceil, new_ceil],
+        marker_color=[c["accent"], new_color],
+        text=[f"{orig_ceil} units", f"{new_ceil} units"],
+        textposition="outside",
+        textfont=dict(color=c["text"], size=13),
+        customdata=hover,
+        hovertemplate="%{customdata}<extra></extra>",
+    ))
+    fig.update_layout(
+        **_base_layout(c, f"Forecast Comparison — {sku_id}"),
+        xaxis=dict(gridcolor=c["grid"], zerolinecolor=c["grid"]),
+        yaxis=dict(title="Units", gridcolor=c["grid"], zerolinecolor=c["grid"]),
     )
     return fig
+
+
+def _order_comparison(
+    custom_qty: float | None,
+    opt: dict,
+    q10: float, q50: float, q90: float,
+    unit_margin: float, holding_cost: float,
+) -> list:
+    """Show comparison between custom order qty and optimal."""
+    if custom_qty is None:
+        return []
+
+    opt_qty  = opt["optimal_qty"]
+    diff     = custom_qty - opt_qty
+
+    sim = simulate_cost_distribution(
+        q10, q50, q90, custom_qty,
+        unit_margin, holding_cost,
+        n_simulations=3_000, seed=42,
+    )
+    sim_opt = simulate_cost_distribution(
+        q10, q50, q90, opt_qty,
+        unit_margin, holding_cost,
+        n_simulations=3_000, seed=42,
+    )
+
+    custom_cost = float(sim["total_cost"].mean())
+    opt_cost    = float(sim_opt["total_cost"].mean())
+    extra_cost  = custom_cost - opt_cost
+
+    sign   = "+" if diff >= 0 else ""
+    colour = "warning" if abs(extra_cost) > 0.01 else "success"
+    icon   = "⚠" if abs(extra_cost) > 0.01 else "✓"
+
+    return [dbc.Alert([
+        html.Strong(f"{icon} Your order: {int(custom_qty)} units  "),
+        html.Span(f"(optimal is {math.ceil(opt_qty)} units, {sign}{diff:+.0f})"),
+        html.Br(),
+        html.Span(
+            f"Expected cost at your quantity: ${custom_cost:.2f}  "
+            f"vs  optimal: ${opt_cost:.2f}  →  "
+            f"{'extra cost' if extra_cost > 0 else 'saving'}: "
+            f"${abs(extra_cost):.2f}",
+            style={"fontSize": "13px"},
+        ),
+    ], color=colour, className="py-2", style={"fontSize": "13px"})]
 
 
 def _cost_curve_figure(
     curve: pd.DataFrame,
     opt: dict,
     q50: float,
+    custom_qty: float | None,
     sku_id: str,
     dark: bool,
 ) -> go.Figure:
@@ -356,29 +505,51 @@ def _cost_curve_figure(
         x=curve["order_qty"], y=curve["mean_stockout"],
         name="Stockout cost", mode="lines",
         line=dict(color="#ef4444", width=2),
+        hovertemplate=(
+            "<b>Order %{x:.0f} units</b><br>"
+            "Stockout cost: $%{y:.2f}<br>"
+            "<i>Cost of running out of stock (lost margin)</i><extra></extra>"
+        ),
     ))
     fig.add_trace(go.Scatter(
         x=curve["order_qty"], y=curve["mean_overstock"],
         name="Overstock cost", mode="lines",
         line=dict(color="#3b82f6", width=2),
+        hovertemplate=(
+            "<b>Order %{x:.0f} units</b><br>"
+            "Overstock cost: $%{y:.2f}<br>"
+            "<i>Cost of holding unsold units</i><extra></extra>"
+        ),
     ))
     fig.add_trace(go.Scatter(
         x=curve["order_qty"], y=curve["mean_total"],
         name="Total cost", mode="lines",
         line=dict(color=c["line"], width=2.5),
+        hovertemplate=(
+            "<b>Order %{x:.0f} units</b><br>"
+            "Total cost: $%{y:.2f}<br>"
+            "<i>Stockout + overstock combined</i><extra></extra>"
+        ),
     ))
     fig.add_vline(
         x=opt["optimal_qty"], line_dash="dash", line_color="#22c55e",
-        annotation_text=f"Optimal: {opt['optimal_qty']:.1f}",
+        annotation_text=f"Optimal: {math.ceil(opt['optimal_qty'])}u",
         annotation_position="top right",
         annotation_font_color="#22c55e",
     )
     fig.add_vline(
         x=q50, line_dash="dot", line_color="gray",
-        annotation_text=f"q50: {q50:.1f}",
+        annotation_text=f"Forecast: {int(q50)}u",
         annotation_position="top left",
         annotation_font_color=c["text"],
     )
+    if custom_qty is not None:
+        fig.add_vline(
+            x=custom_qty, line_dash="dashdot", line_color="#f97316",
+            annotation_text=f"Your order: {int(custom_qty)}u",
+            annotation_position="bottom right",
+            annotation_font_color="#f97316",
+        )
     fig.update_layout(
         paper_bgcolor=c["bg"],
         plot_bgcolor=c["bg"],
@@ -388,6 +559,88 @@ def _cost_curve_figure(
         yaxis=dict(title="Expected Cost ($)",      gridcolor=c["grid"], zerolinecolor=c["grid"]),
         legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0),
         title=dict(text=f"Cost vs Order Quantity — {sku_id}", font=dict(size=14), x=0.5, xanchor="center"),
+    )
+    return fig
+
+
+def _risk_distribution_figure(
+    sim: pd.DataFrame, sku_id: str, dark: bool,
+) -> go.Figure:
+    c      = _theme(dark)
+    costs  = sim["total_cost"].values
+    n      = len(costs)
+    mean_c = float(costs.mean())
+    p90    = float(np.percentile(costs, 90))
+    p95    = float(np.percentile(costs, 95))
+
+    fig = go.Figure(go.Histogram(
+        x=costs,
+        nbinsx=40,
+        histnorm="percent",
+        marker_color=c["accent"],
+        opacity=0.75,
+        hovertemplate=(
+            "Cost range: $%{x:.2f}<br>"
+            "%{y:.1f}% of simulated weeks fell here<extra></extra>"
+        ),
+        name="",
+    ))
+
+    # Reference lines as Scatter traces so they support hovertemplate
+    refs = [
+        (
+            mean_c, "#22c55e", "Mean",
+            f"<b>Average cost: ${mean_c:.2f}</b><br>"
+            f"Across {n:,} simulated demand scenarios,<br>"
+            f"the expected total cost is ${mean_c:.2f} per period.<br>"
+            f"This is the number shown in the cost cards above.",
+        ),
+        (
+            p90, "#f97316", "P90",
+            f"<b>90th percentile: ${p90:.2f}</b><br>"
+            f"In 1 out of every 10 simulated weeks,<br>"
+            f"the total cost exceeds ${p90:.2f}.<br>"
+            f"This is your moderate downside risk.",
+        ),
+        (
+            p95, "#ef4444", "P95",
+            f"<b>95th percentile: ${p95:.2f}</b><br>"
+            f"Only 5% of simulated weeks cost more than ${p95:.2f}.<br>"
+            f"This is your worst-case realistic scenario.<br>"
+            f"If you can absorb this, the optimal order is safe.",
+        ),
+    ]
+
+    for val, color, name, tooltip in refs:
+        fig.add_trace(go.Scatter(
+            x=[val, val], y=[0, 100],
+            mode="lines",
+            line=dict(color=color, dash="dash", width=2),
+            name=name,
+            hovertemplate=tooltip + "<extra></extra>",
+        ))
+
+    fig.update_layout(
+        paper_bgcolor=c["bg"], plot_bgcolor=c["bg"],
+        font=dict(color=c["text"], size=12),
+        margin=dict(l=40, r=20, t=50, b=50),
+        title=dict(
+            text=f"Cost Risk Distribution — {n:,} Simulated Demand Scenarios (optimal order qty)",
+            font=dict(size=12), x=0.5, xanchor="center",
+        ),
+        xaxis=dict(
+            title="Total cost for the period ($)",
+            gridcolor=c["grid"], zerolinecolor=c["grid"],
+        ),
+        yaxis=dict(
+            title="% of simulated weeks",
+            gridcolor=c["grid"],
+            range=[0, None],
+        ),
+        legend=dict(
+            orientation="h", y=-0.25, x=0,
+            font=dict(size=11),
+        ),
     )
     return fig
 
@@ -501,17 +754,14 @@ def _bullet_list(items: list) -> html.Ul:
 
 def _q4_nlg(
     sku_id: str,
-    orig_price: float,    cur_price: float,
-    orig_discount: float, cur_discount: float,
-    orig_snap: int,       cur_snap: int,
+    orig_price: float, cur_price: float,
+    orig_snap: int,    cur_snap: int,
     original_pred: float,
     new_pred: float,
     delta: float,
 ) -> html.Div:
-    sign      = "+" if delta >= 0 else ""
-    pct       = abs(delta) / original_pred * 100 if original_pred != 0 else 0.0
-    direction = "increase" if delta >= 0 else "decrease"
-
+    pct        = abs(delta) / original_pred * 100 if original_pred != 0 else 0.0
+    direction  = "increase" if delta >= 0 else "decrease"
     orig_ceil  = math.ceil(original_pred)
     new_ceil   = math.ceil(new_pred)
     delta_ceil = new_ceil - orig_ceil
@@ -520,24 +770,20 @@ def _q4_nlg(
     changed = []
     if abs(cur_price - orig_price) > 0.001:
         changed.append(f"Price: ${orig_price:.2f} → ${cur_price:.2f}")
-    if abs(cur_discount - orig_discount) > 0.001:
-        changed.append(
-            f"Discount: {orig_discount * 100:.0f}% → {cur_discount * 100:.0f}%"
-        )
     if cur_snap != orig_snap:
-        changed.append(
-            f"SNAP: {'Off' if orig_snap == 0 else 'On'} → {'Off' if cur_snap == 0 else 'On'}"
-        )
+        changed.append(f"SNAP: {'Off → On' if cur_snap else 'On → Off'}")
 
     bullets = [
-        f"Changes applied: {', '.join(changed) if changed else 'none (showing baseline)'}",
-        f"Combined forecast impact: {sign_ceil}{delta_ceil} units ({sign}{pct:.1f}% {direction}) vs baseline",
-        "Use the tabs above to explore how each feature independently drives the forecast.",
+        f"Scenario: {', '.join(changed) if changed else 'no changes vs forecast period defaults'}",
+        f"New forecast: {new_ceil} units (was {orig_ceil}) — {sign_ceil}{delta_ceil} units "
+        f"({pct:.1f}% {direction})",
     ]
+    if not changed:
+        bullets.append("Adjust price or SNAP above and hit Run to simulate a scenario.")
 
     return html.Div([
         html.Hr(),
-        _section_label(f"What-If Impact — {sku_id}"),
+        _section_label(f"Simulation Result — {sku_id}"),
         _bullet_list(bullets),
     ])
 
@@ -545,41 +791,44 @@ def _q4_nlg(
 def _q10_nlg(
     sku_id: str,
     q50: float,
+    sell_price: float,
+    margin_pct: float,
+    holding_pct: float,
     opt: dict,
     exp_so: float,
     exp_os: float,
     unit_margin: float,
     holding_cost: float,
     dominant: str,
+    p90_cost: float,
+    p95_cost: float,
 ) -> html.Div:
     exp_tot      = exp_so + exp_os
     opt_ceil     = math.ceil(opt["optimal_qty"])
     q50_ceil     = math.ceil(q50)
     order_vs_q50 = opt_ceil - q50_ceil
-    vs_txt = (
-        f"{abs(order_vs_q50)} units above q50"
-        if order_vs_q50 >= 0
-        else f"{abs(order_vs_q50)} units below q50"
-    )
+    vs_txt       = (f"{abs(order_vs_q50)} units above scenario forecast"
+                    if order_vs_q50 >= 0
+                    else f"{abs(order_vs_q50)} units below scenario forecast")
 
     if dominant == "STOCKOUT":
-        rec = (
-            f"The stockout cost (${unit_margin:.2f}/unit) outweighs holding cost "
-            f"(${holding_cost:.2f}/unit) — consider ordering above the point forecast."
-        )
+        rec = (f"Stockout risk dominates — margin lost per missed unit (${unit_margin:.2f}) "
+               f"exceeds holding cost (${holding_cost:.2f}). Order above the forecast.")
     else:
-        rec = (
-            f"The holding cost (${holding_cost:.2f}/unit) outweighs stockout cost "
-            f"(${unit_margin:.2f}/unit) — stay close to or below the point forecast."
-        )
+        rec = (f"Overstock risk dominates — holding cost per unit (${holding_cost:.2f}) "
+               f"exceeds stockout margin (${unit_margin:.2f}). Stay at or below the forecast.")
+
+    p90_mult = p90_cost / exp_tot if exp_tot > 0 else 1.0
+    p95_mult = p95_cost / exp_tot if exp_tot > 0 else 1.0
 
     bullets = [
-        f"Point forecast (q50): {q50_ceil} units",
-        f"Optimal order quantity: {opt_ceil} units ({vs_txt})",
-        f"Expected stockout cost at optimal: ${exp_so:.2f}",
-        f"Expected overstock cost at optimal: ${exp_os:.2f}",
-        f"Expected total cost: ${exp_tot:.2f}",
+        f"Scenario forecast: {q50_ceil} units at ${sell_price:.2f}/unit",
+        f"Margin: {margin_pct:.0f}% = ${unit_margin:.2f}/unit  |  Holding: {holding_pct:.0f}% = ${holding_cost:.2f}/unit",
+        f"Optimal order: {opt_ceil} units ({vs_txt})",
+        f"Expected cost at optimal: ${exp_tot:.2f}  (stockout ${exp_so:.2f}  +  overstock ${exp_os:.2f})",
         rec,
+        f"Risk tail: 1 in 10 weeks you could pay ${p90_cost:.2f} ({p90_mult:.1f}× the average) — "
+        f"and in the worst 5% of weeks up to ${p95_cost:.2f} ({p95_mult:.1f}× the average).",
     ]
 
     return html.Div([

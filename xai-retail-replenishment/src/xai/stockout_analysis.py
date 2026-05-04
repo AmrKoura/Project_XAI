@@ -20,24 +20,24 @@ from scipy import sparse
 
 def _compute_shap_matrix(model: object, X: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
     """Return (shap_matrix, feature_names) for all rows in X."""
-    if hasattr(model, "named_steps") and "prep" in model.named_steps and "model" in model.named_steps:
-        preprocessor = model.named_steps["prep"]
-        estimator    = model.named_steps["model"]
+    if not (hasattr(model, "named_steps") and "model" in model.named_steps):
+        raise TypeError("Model must be a sklearn Pipeline with a 'model' step.")
 
-        X_t = preprocessor.transform(X)
-        if sparse.issparse(X_t):
-            X_t = X_t.toarray()
+    estimator = model.named_steps["model"]
+    X_t = X
+    for name, step in model.named_steps.items():
+        if name == "model":
+            break
+        X_t = step.transform(X_t)
 
-        try:
-            feature_names = list(preprocessor.get_feature_names_out())
-        except Exception:
-            feature_names = [f"feature_{i}" for i in range(X_t.shape[1])]
+    if sparse.issparse(X_t):
+        X_t = X_t.toarray()
 
-        explainer = shap.TreeExplainer(estimator)
-        shap_raw  = explainer(X_t)
-        return np.asarray(shap_raw.values), feature_names
+    feature_names = list(X.columns) if hasattr(X, "columns") else [f"f{i}" for i in range(X_t.shape[1])]
 
-    raise TypeError("Model must be a sklearn Pipeline with 'prep' and 'model' steps.")
+    explainer = shap.TreeExplainer(estimator)
+    shap_raw  = explainer(X_t)
+    return np.asarray(shap_raw.values), feature_names
 
 
 # ── public API ────────────────────────────────────────────────────────────────

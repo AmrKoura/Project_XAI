@@ -25,7 +25,7 @@ def create_navbar() -> html.Nav:
         html.Ul([
             _tab("Overview",     "/"),
             _tab("SKU Explorer", "/sku-explorer"),
-            _tab("Explanations", "/explanations"),
+            _tab("Model Analysis", "/explanations"),
             _tab("What-If",      "/what-if"),
             _tab("Reports",      "/reports"),
         ], className="nav-tab-list"),
@@ -39,6 +39,16 @@ def create_navbar() -> html.Nav:
                     {"label": "28-day", "value": "28d"},
                 ],
                 value="7d",
+            ),
+            dbc.Select(
+                id="model-type-dropdown",
+                options=[
+                    {"label": "LightGBM",     "value": "lightgbm"},
+                    {"label": "XGBoost",       "value": "xgboost"},
+                    {"label": "Random Forest", "value": "random_forest"},
+                    # {"label": "Neural Network", "value": "neural_network"},
+                ],
+                value="lightgbm",
             ),
             dbc.Button(
                 "",
@@ -57,8 +67,9 @@ def create_layout() -> html.Div:
         dcc.Location(id="url", refresh=False),
 
         # Persistent stores
-        dcc.Store(id="theme-store", data="light"),
-        dcc.Store(id="model-store", data="7d"),
+        dcc.Store(id="theme-store",      data="light"),
+        dcc.Store(id="model-store",      data="7d"),
+        dcc.Store(id="model-type-store", data="lightgbm"),
 
         # Page content wrapped in loading spinner for model switches
         dcc.Loading(

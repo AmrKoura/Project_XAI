@@ -8,16 +8,16 @@ import dash_bootstrap_components as dbc
 _URGENCY_COLOUR = {"CRITICAL": "danger", "HIGH": "warning", "LOW": "success"}
 
 _COL_TOOLTIPS = {
-    "sku_id":              "Unique product code",
-    "forecast_q50":        "Best single estimate of demand for the forecast period — think of it as the 'most likely' number",
-    "forecast_q10":        "Low-end demand estimate — there's only a 10% chance actual demand is below this",
-    "forecast_q90":        "High-end demand estimate — there's only a 10% chance actual demand is above this",
-    "safety_stock":        "Extra buffer units kept to protect against unexpected demand spikes",
-    "days_of_stock":       "How many days current stock will last at the expected daily demand rate",
-    "reorder_qty":         "Number of units the system recommends ordering to replenish stock",
-    "trigger_reorder":     "Whether the system recommends placing an order right now",
-    "urgency":             "How urgent replenishment is — based on how many days of stock remain vs lead time",
-    "confidence_band_pct": "How wide the forecast range is as a % of the expected demand — lower means more confident",
+    "sku_id":              "Unique product identifier",
+    "forecast_q50":        "Predicted demand for the selected forecast window (7/14/28 days) — the model's best single estimate",
+    "stock_on_hand":       "Estimated current inventory. Formula: (avg daily demand x lead time) + (safety stock x multiplier). The multiplier (0.5-2.0) simulates different stock levels across SKUs",
+    "safety_stock":        "Buffer units to cover demand uncertainty. Formula: (Q90 - Q50) x sqrt(lead time / window). Stays consistent across all forecast windows for the same SKU",
+    "days_of_stock":       "How many days current stock will last. Formula: Stock on Hand / (Forecast / Window). E.g. forecast 14 units over 7 days = 2 units/day daily demand",
+    "reorder_point":       "Stock level at which an order must be placed. Formula: (avg daily demand x lead time) + safety stock. If stock falls to or below this, Order Now = True",
+    "reorder_qty":         "Units recommended to order. Formula: max(0, Forecast + Safety Stock - Stock on Hand)",
+    "trigger_reorder":     "True when Stock on Hand is at or below the Reorder Point — meaning stock will run out before the next delivery arrives if no order is placed now",
+    "urgency":             "CRITICAL: Order Now is True AND stock runs out before next delivery (days of stock < 7). HIGH: Order Now is True but stock still covers the lead time. LOW: Order Now is False — no action needed.",
+    "confidence_band_pct": "Forecast uncertainty as % of median. Formula: (Q90 - Q10) / Q50 x 100. Lower % = more confident. Q90 = Q50 + 1.282 x sigma, Q10 = Q50 - 1.282 x sigma",
 }
 
 
@@ -39,6 +39,8 @@ def layout() -> html.Div:
                 ),
             ], width="auto"),
         ], align="end", className="mb-3"),
+
+        html.Div(id="dash-date-context", className="mb-3"),
 
         html.Div(id="dash-summary-stats", className="mb-4"),
 
@@ -74,6 +76,25 @@ def layout() -> html.Div:
                 ),
             ], width="auto"),
         ], className="mb-3 g-3"),
+
+        dbc.Card([
+            dbc.CardHeader(html.Strong("Replenishment Cards")),
+            dbc.CardBody([
+                html.Div(id="replenishment-cards-grid"),
+                dbc.Row(
+                    dbc.Col(
+                        dbc.Button(
+                            "Load More", id="cards-load-more",
+                            color="secondary", outline=True, size="sm",
+                            className="mt-2",
+                        ),
+                        width="auto",
+                    ),
+                    id="cards-load-more-row", justify="center",
+                ),
+                dcc.Store(id="cards-visible-count", data=8),
+            ]),
+        ], className="mb-4 shadow-sm"),
 
         dbc.Card([
             dbc.CardHeader(html.Strong("SKU Overview")),
@@ -132,8 +153,23 @@ def layout() -> html.Div:
         ], className="mb-4 shadow-sm"),
 
         dbc.Card([
-            dbc.CardHeader(html.Strong("Replenishment Cards")),
-            dbc.CardBody(html.Div(id="replenishment-cards-grid")),
+            dbc.CardHeader(
+                html.Span([
+                    html.Strong("Stockout Risk Analysis"),
+                    html.Span(" ⓘ", id="stockout-info", style={
+                        "cursor": "pointer", "fontSize": "14px",
+                        "color": "#6c757d", "marginLeft": "6px", "userSelect": "none",
+                    }),
+                    dbc.Tooltip(
+                        "Top 30 SKUs ranked by lowest days of stock remaining. "
+                        "CRITICAL = stock runs out before the next delivery arrives (< 7 days). "
+                        "HIGH = running low (7–14 days). LOW = well stocked (≥ 14 days).",
+                        target="stockout-info", placement="right",
+                        style={"maxWidth": "380px", "textAlign": "left"},
+                    ),
+                ])
+            ),
+            dbc.CardBody(html.Div(id="stockout-risk-content")),
         ], className="shadow-sm"),
     ])
 
@@ -141,13 +177,13 @@ def layout() -> html.Div:
 def build_sku_overview_table(df_records: list[dict], dark: bool = False) -> dash_table.DataTable:
     columns = [
         {"name": "SKU",           "id": "sku_id"},
-        {"name": "Forecast (q50)","id": "forecast_q50",       "type": "numeric"},
-        {"name": "Low (q10)",     "id": "forecast_q10",       "type": "numeric"},
-        {"name": "High (q90)",    "id": "forecast_q90",       "type": "numeric"},
-        {"name": "Safety Stock",  "id": "safety_stock",       "type": "numeric"},
-        {"name": "Days of Stock", "id": "days_of_stock",      "type": "numeric", "format": {"specifier": ".1f"}},
-        {"name": "Order Qty",     "id": "reorder_qty",        "type": "numeric"},
-        {"name": "Order Now?",    "id": "trigger_reorder"},
+        {"name": "Forecast",      "id": "forecast_q50",       "type": "numeric"},
+        {"name": "Stock on Hand",  "id": "stock_on_hand",   "type": "numeric"},
+        {"name": "Safety Stock",   "id": "safety_stock",    "type": "numeric"},
+        {"name": "Days of Stock",  "id": "days_of_stock",   "type": "numeric", "format": {"specifier": ".1f"}},
+        {"name": "Reorder Point",  "id": "reorder_point",   "type": "numeric", "format": {"specifier": ".1f"}},
+        {"name": "Order Qty",      "id": "reorder_qty",     "type": "numeric"},
+        {"name": "Order Now?",     "id": "trigger_reorder"},
         {"name": "Urgency",       "id": "urgency"},
         {"name": "Confidence %",  "id": "confidence_band_pct","type": "numeric", "format": {"specifier": ".1f"}},
     ]
@@ -200,12 +236,12 @@ def build_sku_overview_table(df_records: list[dict], dark: bool = False) -> dash
     )
 
 
-def build_replenishment_cards(records: list[dict]) -> html.Div:
+def build_replenishment_cards(records: list[dict], visible: int = 8) -> html.Div:
     if not records:
         return html.P("No SKUs match the current filter.", className="text-muted")
 
     cards = []
-    for r in records[:24]:
+    for r in records[:visible]:
         urgency = r.get("urgency", "LOW")
         colour  = _URGENCY_COLOUR.get(urgency, "secondary")
 

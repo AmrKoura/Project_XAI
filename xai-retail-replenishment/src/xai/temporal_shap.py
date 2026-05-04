@@ -14,26 +14,34 @@ from scipy import sparse
 
 
 def _compute_shap_matrix(model: object, X: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
-    """Return (shap_matrix, feature_names) for all rows in X."""
-    if hasattr(model, "named_steps") and "prep" in model.named_steps and "model" in model.named_steps:
-        preprocessor = model.named_steps["prep"]
-        estimator    = model.named_steps["model"]
+    """Return (shap_matrix, feature_names) for all rows in X.
 
-        X_t = preprocessor.transform(X)
-        if sparse.issparse(X_t):
-            X_t = X_t.toarray()
+    Handles both the old ``prep → model`` pipeline and the V4
+    ``impute → scale → model`` pipeline.
+    """
+    if not (hasattr(model, "named_steps") and "model" in model.named_steps):
+        raise TypeError("Model must be a sklearn Pipeline with a 'model' step.")
 
-        try:
-            feature_names = list(preprocessor.get_feature_names_out())
-        except Exception:
-            feature_names = [f"feature_{i}" for i in range(X_t.shape[1])]
+    estimator = model.named_steps["model"]
 
-        explainer  = shap.TreeExplainer(estimator)
-        shap_raw   = explainer(X_t)
-        values     = np.asarray(shap_raw.values)
-        return values, feature_names
+    # Apply every step except 'model' to get the transformed matrix
+    import numpy as _np
+    X_t = X
+    for name, step in model.named_steps.items():
+        if name == "model":
+            break
+        X_t = step.transform(X_t)
 
-    raise TypeError("Model must be a sklearn Pipeline with 'prep' and 'model' steps.")
+    if sparse.issparse(X_t):
+        X_t = X_t.toarray()
+
+    # Feature names: prefer column names from original X (works for V4 pipelines
+    # that don't rename features); fall back to index-based names
+    feature_names = list(X.columns) if hasattr(X, "columns") else [f"f{i}" for i in range(X_t.shape[1])]
+
+    explainer = shap.TreeExplainer(estimator)
+    shap_raw  = explainer(X_t)
+    return np.asarray(shap_raw.values), feature_names
 
 
 def compute_temporal_shap(

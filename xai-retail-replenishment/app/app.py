@@ -33,7 +33,7 @@ import app.data_store as ds
 
 def create_app() -> dash.Dash:
     """Initialise and configure the Dash application."""
-    ds.load("7d")
+    ds.load("7d", "lightgbm")
 
     app = dash.Dash(
         __name__,
@@ -69,23 +69,36 @@ def register_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
 
-    # ── model switch ──────────────────────────────────────────────────────────
+    # ── window switch ─────────────────────────────────────────────────────────
     @app.callback(
         Output("model-store", "data"),
         Input("model-dropdown", "value"),
+        State("model-type-store", "data"),
         prevent_initial_call=True,
     )
-    def switch_model(model_key: str) -> str:
-        ds.reload(model_key)
+    def switch_window(model_key: str, model_type: str) -> str:
+        ds.reload(model_key, model_type or "lightgbm")
         return model_key
+
+    # ── model type switch ─────────────────────────────────────────────────────
+    @app.callback(
+        Output("model-type-store", "data"),
+        Input("model-type-dropdown", "value"),
+        State("model-store", "data"),
+        prevent_initial_call=True,
+    )
+    def switch_model_type(model_type: str, model_key: str) -> str:
+        ds.reload(model_key or "7d", model_type)
+        return model_type
 
     # ── page routing ──────────────────────────────────────────────────────────
     @app.callback(
         Output("page-content", "children"),
         Input("url", "pathname"),
         Input("model-store", "data"),
+        Input("model-type-store", "data"),
     )
-    def display_page(pathname: str, _model_key: str):
+    def display_page(pathname: str, _model_key: str, _model_type: str):
         if pathname in ("/", "/overview"):
             return dashboard.layout()
         if pathname == "/sku-explorer":

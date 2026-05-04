@@ -22,7 +22,6 @@ from docx.oxml import OxmlElement
 import app.data_store as ds
 from xai.uncertainty import compute_prediction_interval, confidence_label
 from xai.cost_impact import simulate_cost_distribution, optimal_order_quantity
-from xai.counterfactual import batch_counterfactuals
 from xai.local_shap import get_top_contributors
 from xai.temporal_shap import classify_demand_pattern
 
@@ -109,11 +108,20 @@ def _add_chart(doc: Document, fig, width_in: float = 6.0) -> None:
 
 # ── SKU data (shared with pdf_builder) ───────────────────────────────────────
 
-def _sku_data(sku_id: str, unit_margin: float, holding_cost: float) -> dict:
+def _sku_data(sku_id: str, margin_pct: float, holding_pct: float) -> dict:
     iv      = ds.forecasts.get(sku_id, {"q10": 0, "q50": 0, "q90": 0})
     card_df = ds.cards_df[ds.cards_df["sku_id"] == sku_id]
     card    = card_df.iloc[0].to_dict() if not card_df.empty else {}
     std_v   = float(ds.sku_std.get(sku_id, float(ds.sku_std.mean())))
+
+    # Convert % → $ using this SKU's actual sell price
+    try:
+        X_row      = ds.get_sku_X_row(sku_id)
+        sell_price = float(X_row["aggregated_sell_price"].iloc[0])
+    except Exception:
+        sell_price = 1.0
+    unit_margin  = sell_price * margin_pct  / 100.0
+    holding_cost = sell_price * holding_pct / 100.0
     pi      = compute_prediction_interval(iv["q50"], std_v)
     conf    = confidence_label(pi["width"], iv["q50"])
 
@@ -224,26 +232,33 @@ def _sec_temporal(doc: Document, d: dict) -> None:
     _heading(doc, "Temporal Demand Pattern")
     doc.add_paragraph(f"Classified pattern: {d['pattern'].upper()}")
     try:
-        from app.callbacks.sku_callbacks import _temporal_heatmap
-        _add_chart(doc, _temporal_heatmap(d["sku_id"], dark=False))
+        from app.callbacks.sku_callbacks import _temporal_line_chart
+        _add_chart(doc, _temporal_line_chart(d["sku_id"], dark=False))
     except Exception:
         pass
 
 
 def _sec_whatif(doc: Document, d: dict) -> None:
-    _heading(doc, "What-If Sensitivity")
+    _heading(doc, "What-If Scenario")
     try:
-        from app.callbacks.whatif_callbacks import _price_figure
+        from app.callbacks.whatif_callbacks import _compare_figure
         X_row      = ds.get_sku_X_row(d["sku_id"])
         orig_price = float(X_row["aggregated_sell_price"].iloc[0])
-        orig_pred  = float(ds.model.predict(X_row)[0])
-        batch      = batch_counterfactuals(
-            ds.model, X_row, "aggregated_sell_price",
-            np.linspace(orig_price * 0.5, orig_price * 1.5, 30),
+        baseline   = float(d["iv"]["q50"])
+        # Simulate a -10% price scenario
+        X_mod = X_row.copy()
+        X_mod["aggregated_sell_price"] = orig_price * 0.9
+        new_pred = max(0.0, float(ds.model.predict(X_mod)[0]))
+        _add_chart(doc, _compare_figure(
+            baseline, new_pred, d["sku_id"],
+            f"price −10% (${orig_price * 0.9:.2f})", dark=False,
+        ))
+        doc.add_paragraph(
+            f"Scenario: price reduced 10% from ${orig_price:.2f} to ${orig_price * 0.9:.2f}. "
+            f"Baseline forecast: {math.ceil(baseline)} units → Scenario: {math.ceil(new_pred)} units."
         )
-        _add_chart(doc, _price_figure(batch, orig_price, orig_pred, d["sku_id"], dark=False))
     except Exception:
-        doc.add_paragraph("What-If data not available.")
+        doc.add_paragraph("What-If scenario not available.")
 
 
 def _sec_cost(doc: Document, d: dict) -> None:
@@ -270,7 +285,7 @@ def _sec_cost(doc: Document, d: dict) -> None:
                          "mean_stockout": float(s["stockout_cost"].mean()),
                          "mean_overstock": float(s["overstock_cost"].mean()),
                          "mean_total": float(s["total_cost"].mean())})
-        _add_chart(doc, _cost_curve_figure(pd.DataFrame(rows), opt, q50, d["sku_id"], dark=False))
+        _add_chart(doc, _cost_curve_figure(pd.DataFrame(rows), opt, q50, None, d["sku_id"], dark=False))
     except Exception:
         pass
 
@@ -309,8 +324,8 @@ def build_docx(
     sku_ids:      list[str],
     template:     str,
     sections:     list[str],
-    unit_margin:  float,
-    holding_cost: float,
+    unit_margin:  float,   # gross margin % (e.g. 25 = 25%)
+    holding_cost: float,   # holding cost % (e.g. 8 = 8%)
     model_key:    str,
 ) -> bytes:
     doc = Document()
@@ -330,7 +345,8 @@ def build_docx(
     for run in title.runs:
         run.font.color.rgb = _PURPLE
 
-    sub = doc.add_paragraph(f"{cfg['label']} · LightGBM · M5 Walmart — Generated: {today}")
+    model_label = ds.MODEL_TYPES.get(ds.current_model_type, ds.current_model_type)
+    sub = doc.add_paragraph(f"{cfg['label']} · {model_label} · M5 Walmart — Generated: {today}")
     sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     doc.add_paragraph()
@@ -351,7 +367,14 @@ def build_docx(
             cd   = ds.cards_df[ds.cards_df["sku_id"] == sid]
             card = cd.iloc[0].to_dict() if not cd.empty else {}
             std  = float(ds.sku_std.get(sid, float(ds.sku_std.mean())))
-            opt  = optimal_order_quantity(iv["q10"], iv["q50"], iv["q90"], unit_margin, holding_cost)
+            try:
+                _xr = ds.get_sku_X_row(sid)
+                _sp = float(_xr["aggregated_sell_price"].iloc[0])
+            except Exception:
+                _sp = 1.0
+            _um  = _sp * unit_margin  / 100.0
+            _hc  = _sp * holding_cost / 100.0
+            opt  = optimal_order_quantity(iv["q10"], iv["q50"], iv["q90"], _um, _hc)
             pi   = compute_prediction_interval(iv["q50"], std)
             conf = confidence_label(pi["width"], iv["q50"])
             for c, val in enumerate([sid, card.get("urgency", "—"),
@@ -368,7 +391,7 @@ def build_docx(
         _heading(doc, sku_id, level=2)
 
         if template == "exec":
-            d = _sku_data(sku_id, unit_margin, holding_cost)
+            d = _sku_data(sku_id, unit_margin, holding_cost)  # passed as % from UI
             card = d["card"]
             bullets = [
                 f"Urgency: {card.get('urgency', '—')} — "

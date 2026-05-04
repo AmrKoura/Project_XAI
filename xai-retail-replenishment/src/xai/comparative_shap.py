@@ -21,59 +21,52 @@ SKU_IDENTITY_FEATURES = [
 ]
 
 
+def _transform(model, X_in):
+    """Apply all pre-model pipeline steps to X_in and return transformed array + feature names."""
+    estimator = model.named_steps["model"]
+    X_t = X_in
+    for name, step in model.named_steps.items():
+        if name == "model":
+            break
+        X_t = step.transform(X_t)
+    if sparse.issparse(X_t):
+        X_t = X_t.toarray()
+    feature_names = list(X_in.columns) if hasattr(X_in, "columns") else [f"f{i}" for i in range(X_t.shape[1])]
+    return estimator, X_t, feature_names
+
+
 def _get_shap_for_row(model: object, X: pd.DataFrame, idx: int):
     """Return (feature_names, shap_values_1d, prediction) for one row."""
+    if not (hasattr(model, "named_steps") and "model" in model.named_steps):
+        raise TypeError("Model must be a sklearn Pipeline with a 'model' step.")
+
     x_row = X.iloc[[idx]]
+    estimator, x_t, feature_names = _transform(model, x_row)
 
-    if hasattr(model, "named_steps") and "prep" in model.named_steps and "model" in model.named_steps:
-        preprocessor = model.named_steps["prep"]
-        estimator = model.named_steps["model"]
+    explainer = shap.TreeExplainer(estimator)
+    shap_raw  = explainer(x_t)
+    values    = np.asarray(shap_raw.values)
+    if values.ndim == 2:
+        values = values[0]
 
-        x_t = preprocessor.transform(x_row)
-        if sparse.issparse(x_t):
-            x_t = x_t.toarray()
-
-        try:
-            feature_names = list(preprocessor.get_feature_names_out())
-        except Exception:
-            feature_names = [f"feature_{i}" for i in range(x_t.shape[1])]
-
-        explainer = shap.TreeExplainer(estimator)
-        shap_raw = explainer(x_t)
-        values = np.asarray(shap_raw.values)
-        if values.ndim == 2:
-            values = values[0]
-
-        pred = float(model.predict(x_row)[0])
-        return feature_names, values, pred
-
-    raise TypeError("Model must be a sklearn Pipeline with 'prep' and 'model' steps.")
+    pred = float(model.predict(x_row)[0])
+    return feature_names, values, pred
 
 
 def _get_shap_for_batch(model: object, X: pd.DataFrame, idxs: list[int]):
     """Return (feature_names, shap_matrix, predictions) for multiple rows."""
-    if hasattr(model, "named_steps") and "prep" in model.named_steps and "model" in model.named_steps:
-        preprocessor = model.named_steps["prep"]
-        estimator = model.named_steps["model"]
+    if not (hasattr(model, "named_steps") and "model" in model.named_steps):
+        raise TypeError("Model must be a sklearn Pipeline with a 'model' step.")
 
-        X_sub = X.iloc[idxs]
-        x_t = preprocessor.transform(X_sub)
-        if sparse.issparse(x_t):
-            x_t = x_t.toarray()
+    X_sub = X.iloc[idxs]
+    estimator, x_t, feature_names = _transform(model, X_sub)
 
-        try:
-            feature_names = list(preprocessor.get_feature_names_out())
-        except Exception:
-            feature_names = [f"feature_{i}" for i in range(x_t.shape[1])]
+    explainer = shap.TreeExplainer(estimator)
+    shap_raw  = explainer(x_t)
+    values    = np.asarray(shap_raw.values)
 
-        explainer = shap.TreeExplainer(estimator)
-        shap_raw = explainer(x_t)
-        values = np.asarray(shap_raw.values)
-
-        preds = model.predict(X_sub)
-        return feature_names, values, preds
-
-    raise TypeError("Model must be a sklearn Pipeline with 'prep' and 'model' steps.")
+    preds = model.predict(X_sub)
+    return feature_names, values, preds
 
 
 def find_similar_skus(
@@ -237,6 +230,49 @@ def compare_skus_aggregate(
     df.attrs["pred_b"] = float(preds_b.mean())
     df.attrs["n_rows_a"] = len(idxs_a)
     df.attrs["n_rows_b"] = len(idxs_b)
+    return df
+
+
+def compare_models_for_sku(
+    model_a: object,
+    model_b: object,
+    X: pd.DataFrame,
+    item_ids: pd.Series,
+    sku_id: str,
+) -> pd.DataFrame:
+    """Compare SHAP values for one SKU across two different models.
+
+    Averages SHAP values across all test rows for the SKU so date-specific
+    noise cancels out, leaving each model's persistent reasoning pattern.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``['feature', 'shap_a', 'shap_b', 'diff']``, sorted by |diff|.
+        ``df.attrs['pred_a']`` and ``df.attrs['pred_b']`` hold mean predictions.
+    """
+    idxs = X.index[item_ids == sku_id].tolist()
+    if not idxs:
+        raise ValueError(f"SKU '{sku_id}' not found.")
+
+    pos = [X.index.get_loc(i) for i in idxs]
+
+    names, vals_a, preds_a = _get_shap_for_batch(model_a, X, pos)
+    _,     vals_b, preds_b = _get_shap_for_batch(model_b, X, pos)
+
+    mean_a = vals_a.mean(axis=0)
+    mean_b = vals_b.mean(axis=0)
+
+    df = pd.DataFrame({
+        "feature": [str(f).replace("num__", "").replace("cat__", "") for f in names],
+        "shap_a":  mean_a,
+        "shap_b":  mean_b,
+        "diff":    mean_a - mean_b,
+    })
+    df["abs_diff"] = df["diff"].abs()
+    df = df.sort_values("abs_diff", ascending=False).drop(columns=["abs_diff"]).reset_index(drop=True)
+    df.attrs["pred_a"] = float(preds_a.mean())
+    df.attrs["pred_b"] = float(preds_b.mean())
     return df
 
 

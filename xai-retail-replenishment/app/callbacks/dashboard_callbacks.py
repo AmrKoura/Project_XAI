@@ -4,23 +4,24 @@ Callbacks for the Overview (Dashboard) page.
 
 from __future__ import annotations
 
-from dash import Input, Output, html
+from dash import Input, Output, State, html, ctx, dash_table
 import dash_bootstrap_components as dbc
 
 import app.data_store as ds
 from app.pages.dashboard import build_sku_overview_table, build_replenishment_cards
+from app.callbacks.sku_callbacks import _stockout_risk_table, _date_badge
 
 
 def register_dashboard_callbacks(app) -> None:
 
-    # ── subtitle (updates on model switch) ────────────────────────────────────
+    # ── date context badge ────────────────────────────────────────────────────
     @app.callback(
-        Output("overview-subtitle", "children"),
-        Input("model-store", "data"),
+        Output("dash-date-context", "children"),
+        Input("model-store",      "data"),
+        Input("model-type-store", "data"),
     )
-    def update_subtitle(model_key: str) -> str:
-        cfg = ds.MODEL_CONFIGS.get(model_key, {})
-        return cfg.get("label", "") + " · LGBM · M5 Walmart"
+    def update_dash_date_context(_mk, _mt):
+        return _date_badge()
 
     # ── summary stat cards ────────────────────────────────────────────────────
     @app.callback(
@@ -110,14 +111,32 @@ def register_dashboard_callbacks(app) -> None:
         df = df.sort_values(["_sort", "reorder_qty"], ascending=[True, False]).drop(columns=["_sort"])
         return build_sku_overview_table(df.to_dict("records"), dark=(theme == "dark"))
 
+    # ── replenishment cards — visible count (load more) ───────────────────────
+    @app.callback(
+        Output("cards-visible-count", "data"),
+        Input("cards-load-more",  "n_clicks"),
+        Input("urgency-filter",   "value"),
+        Input("category-filter",  "value"),
+        Input("model-store",      "data"),
+        State("cards-visible-count", "data"),
+        prevent_initial_call=True,
+    )
+    def update_visible_count(_n, urgency, category, _model_key, current):
+        if ctx.triggered_id == "cards-load-more":
+            return current + 8
+        return 8   # reset to 8 when filters / model change
+
     # ── replenishment cards grid ──────────────────────────────────────────────
     @app.callback(
         Output("replenishment-cards-grid", "children"),
-        Input("urgency-filter",  "value"),
-        Input("category-filter", "value"),
-        Input("model-store",     "data"),
+        Output("cards-load-more-row",      "style"),
+        Input("urgency-filter",        "value"),
+        Input("category-filter",       "value"),
+        Input("model-store",           "data"),
+        Input("cards-visible-count",   "data"),
     )
-    def update_replenishment_cards(urgency: str, category: str, _model_key: str):
+    def update_replenishment_cards(urgency: str, category: str,
+                                   _model_key: str, visible: int):
         df = ds.cards_df.copy()
 
         if urgency == "ALL":
@@ -132,4 +151,21 @@ def register_dashboard_callbacks(app) -> None:
         df["_sort"] = df["urgency"].map(urgency_order)
         df = df.sort_values(["_sort", "reorder_qty"], ascending=[True, False])
 
-        return build_replenishment_cards(df.to_dict("records"))
+        records = df.to_dict("records")
+        # Hide the Load More button if all cards are already visible
+        btn_style = {"display": "none"} if visible >= len(records) else {}
+
+        return build_replenishment_cards(records, visible=visible), btn_style
+
+    # ── stockout risk table ───────────────────────────────────────────────────
+    @app.callback(
+        Output("stockout-risk-content", "children"),
+        Input("model-store",      "data"),
+        Input("model-type-store", "data"),
+        Input("theme-store",      "data"),
+        Input("url",              "pathname"),
+    )
+    def update_stockout_risk(_mk, _mt, theme: str, pathname: str):
+        if pathname not in ("/", "/overview"):
+            return []
+        return _stockout_risk_table(dark=(theme == "dark"))
